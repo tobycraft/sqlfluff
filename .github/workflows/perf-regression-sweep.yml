@@ -1,0 +1,261 @@
+name: Perf Regression Sweep
+
+on:
+  workflow_dispatch:
+
+jobs:
+  benchmark-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          pip install uv
+          uv pip install --system -e ".[testutils]"
+
+      - name: Generate Rust dialect files
+        run: |
+          python utils/rustify.py build
+          cp -r sqlfluffrs/sqlfluffrs_dialects/src /tmp/generated_dialects
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sqlfluffrs
+
+      - name: Benchmark all commits
+        shell: bash
+        run: |
+          BASE=$(git merge-base HEAD origin/main)
+          IDX=0
+
+          # Write commit index for use by the summary script.
+          echo "[]" > /tmp/commit_index.json
+
+          while IFS= read -r LINE; do
+            SHA=$(echo "$LINE" | cut -d' ' -f1)
+            MSG=$(echo "$LINE" | cut -d' ' -f2-)
+            IDX=$((IDX + 1))
+            LABEL=$(printf "%02d_%s" "$IDX" "${SHA:0:8}")
+
+            echo "::group::Commit $IDX: $MSG ($SHA)"
+
+            git checkout "$SHA"
+            # Restore dialect files generated at HEAD (performance commits don't touch dialects).
+            cp -r /tmp/generated_dialects/* sqlfluffrs/sqlfluffrs_dialects/src/
+
+            # Rust unit tests
+            cargo test --manifest-path sqlfluffrs/Cargo.toml 2>&1 | tail -5
+
+            # Criterion: tpc_bench (TPC-H + TPC-DS)
+            cargo bench --bench tpc_bench --manifest-path sqlfluffrs/Cargo.toml \
+              -- --save-baseline "$LABEL"
+
+            # Criterion: parser_bench (ANSI micro-benchmarks)
+            cargo bench --bench parser_bench --manifest-path sqlfluffrs/Cargo.toml \
+              -- --save-baseline "$LABEL"
+
+            # Python parse-timing (2 suites: tpc-h, tpc-ds)
+            PARSE_BENCH_OUTPUT="/tmp/parse_bench_${LABEL}.ndjson" \
+              pytest test/core/linter/test_linter.py::test_parse_bench_query -v --tb=short
+
+            # Record label -> commit message mapping (pass via env to handle special chars)
+            LABEL="$LABEL" SHA="$SHA" MSG="$MSG" python3 - <<'PYEOF'
+          import json, os
+          path = "/tmp/commit_index.json"
+          index = json.loads(open(path).read())
+          index.append({"label": os.environ["LABEL"], "sha": os.environ["SHA"], "msg": os.environ["MSG"]})
+          open(path, "w").write(json.dumps(index))
+          PYEOF
+
+            echo "::endgroup::"
+          done < <(git log --reverse --format="%H %s" "$BASE..HEAD")
+
+      - name: Generate step summary
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          CRITERION_ROOT = Path("sqlfluffrs/target/criterion")
+          SKIP_DIRS = {"base", "change", "new", "report"}
+          SUMMARY_FILE = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/stdout")
+
+          # ── Load commit index ──────────────────────────────────────────────────
+          try:
+              commit_index = json.loads(Path("/tmp/commit_index.json").read_text())
+          except Exception:
+              commit_index = []
+
+          labels = [c["label"] for c in commit_index]
+          label_msg = {c["label"]: f"`{c['sha'][:8]}` {c['msg']}" for c in commit_index}
+
+          # ── Load Criterion estimates ───────────────────────────────────────────
+          def load_estimates(path: Path):
+              data = json.loads(path.read_text())
+              m = data.get("mean") or data.get("slope")
+              if m is None:
+                  return None
+              pt = m["point_estimate"]
+              lo = m["confidence_interval"]["lower_bound"]
+              hi = m["confidence_interval"]["upper_bound"]
+              return pt / 1e6, lo / 1e6, hi / 1e6  # ns -> ms
+
+          # {bench_id: {label: (pt_ms, lo_ms, hi_ms)}}
+          criterion: dict[str, dict[str, tuple]] = defaultdict(dict)
+
+          if CRITERION_ROOT.exists():
+              for group_dir in sorted(CRITERION_ROOT.iterdir()):
+                  if not group_dir.is_dir() or group_dir.name in SKIP_DIRS:
+                      continue
+                  for bench_dir in sorted(group_dir.iterdir()):
+                      if not bench_dir.is_dir() or bench_dir.name in SKIP_DIRS:
+                          continue
+                      bench_id = f"{group_dir.name}/{bench_dir.name}"
+                      for run_dir in sorted(bench_dir.iterdir()):
+                          if not run_dir.is_dir() or run_dir.name in SKIP_DIRS:
+                              continue
+                          label = run_dir.name
+                          est_file = run_dir / "estimates.json"
+                          if not est_file.exists():
+                              continue
+                          timing = load_estimates(est_file)
+                          if timing is not None:
+                              criterion[bench_id][label] = timing
+
+          # ── Load Python parse-bench results ───────────────────────────────────
+          # {label: {suite: {median_s, cv, passes, files}}}
+          py_bench: dict[str, dict[str, dict]] = defaultdict(dict)
+          for ndjson in sorted(Path("/tmp").glob("parse_bench_*.ndjson")):
+              label = ndjson.stem.removeprefix("parse_bench_")
+              for line in ndjson.read_text().splitlines():
+                  if not line.strip():
+                      continue
+                  row = json.loads(line)
+                  py_bench[label][row["suite"]] = row
+
+          # ── Helpers ───────────────────────────────────────────────────────────
+          def pct(current, reference):
+              if reference is None or reference == 0:
+                  return "n/a"
+              delta = (current - reference) / reference * 100
+              sign = "+" if delta >= 0 else ""
+              return f"{sign}{delta:.1f}%"
+
+          lines = []
+          w = lines.append
+
+          # ── Section 1: Criterion (Rust) ───────────────────────────────────────
+          w("## Criterion benchmark progression (Rust)")
+          w("")
+
+          if not criterion:
+              w("_No Criterion data found._")
+          else:
+              bench_ids = sorted(criterion.keys())
+              effective_labels = [l for l in labels if any(l in criterion[b] for b in bench_ids)]
+
+              header = "| Benchmark | " + " | ".join(
+                  label_msg.get(l, l) for l in effective_labels
+              ) + " |"
+              sep = "|---|" + "---|" * len(effective_labels)
+              w(header)
+              w(sep)
+
+              for bench_id in bench_ids:
+                  row_data = criterion[bench_id]
+                  cells = []
+                  baseline_pt = None
+                  prior_pt = None
+                  for label in effective_labels:
+                      entry = row_data.get(label)
+                      if entry is None:
+                          cells.append("—")
+                          prior_pt = None
+                          continue
+                      pt, lo, hi = entry
+                      if baseline_pt is None:
+                          baseline_pt = pt
+                      vs_base  = pct(pt, baseline_pt)
+                      vs_prior = pct(pt, prior_pt)
+                      ci_width = (hi - lo) / pt * 100 if pt else 0
+                      cell = f"{pt:.1f}ms"
+                      if prior_pt is not None:
+                          cell += f" ({vs_prior})"
+                      cell += f"<br><small>CI ±{ci_width:.1f}%</small>"
+                      cells.append(cell)
+                      prior_pt = pt
+                  w(f"| {bench_id} | " + " | ".join(cells) + " |")
+
+              w("")
+              w("_Each cell shows the point estimate. (Δ) is change vs the previous commit._")
+              w("_CI ±N% is the Criterion 95% confidence interval width as a fraction of the estimate._")
+
+          w("")
+
+          # ── Section 2: Python parse timing ────────────────────────────────────
+          w("## Python parse timing progression (Linter stack)")
+          w("")
+
+          py_labels = [l for l in labels if l in py_bench]
+          suites = ["tpc-h", "tpc-ds"]
+
+          if not py_labels:
+              w("_No Python benchmark data found._")
+          else:
+              header = "| Suite | " + " | ".join(
+                  label_msg.get(l, l) for l in py_labels
+              ) + " |"
+              sep = "|---|" + "---|" * len(py_labels)
+              w(header)
+              w(sep)
+
+              for suite in suites:
+                  cells = []
+                  baseline_s = None
+                  prior_s = None
+                  for label in py_labels:
+                      entry = py_bench[label].get(suite)
+                      if entry is None:
+                          cells.append("—")
+                          prior_s = None
+                          continue
+                      med = entry["median_s"]
+                      cv  = entry["cv"]
+                      n   = entry["passes"]
+                      if baseline_s is None:
+                          baseline_s = med
+                      vs_prior = pct(med, prior_s)
+                      converged = "✓" if cv < 0.03 else f"CV {cv:.1%}"
+                      cell = f"{med:.2f}s"
+                      if prior_s is not None:
+                          cell += f" ({vs_prior})"
+                      cell += f"<br><small>{n} passes, {converged}</small>"
+                      cells.append(cell)
+                      prior_s = med
+                  w(f"| {suite} | " + " | ".join(cells) + " |")
+
+              w("")
+              w("_Each cell shows median total-suite parse time (all files combined)._")
+              w("_(Δ) is change vs the previous commit. ✓ = CV < 3 %._")
+
+          with open(SUMMARY_FILE, "a", encoding="utf-8") as fh:
+              fh.write("\n".join(lines) + "\n")
+
+          print("Summary written.")
+          PYEOF
