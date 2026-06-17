@@ -1,8 +1,7 @@
 ########################################################
 ## Commit-Range Benchmark Workflow                    ##
 ## Parallelises over commits via a dynamic matrix.   ##
-## Caches are warmed once in `setup` and restored     ##
-## read-only in each parallel `benchmark` job.        ##
+## All logic lives in .github/scripts/.               ##
 ########################################################
 name: Benchmark Commit Range
 
@@ -36,6 +35,9 @@ jobs:
       cargo_build_key: ${{ steps.keys.outputs.cargo_build }}
 
     steps:
+      # Checkout the workflow repo first so .github/scripts/ is available.
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -60,8 +62,8 @@ jobs:
         run: |
           OUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no -p no:warnings --no-header 2>&1 || true)
           echo "$OUT"
-          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)' || echo 0)"         >> "$GITHUB_OUTPUT"
-          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)' || echo 0)"         >> "$GITHUB_OUTPUT"
+          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
+          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
           echo "duration=$(echo "$OUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
 
       - name: Baseline cargo bench
@@ -74,25 +76,9 @@ jobs:
           BL_FAILED:   ${{ steps.bl-pytest.outputs.failed }}
           BL_DURATION: ${{ steps.bl-pytest.outputs.duration }}
         run: |
-          python3 - << 'PY'
-          import json, re, os
-          from pathlib import Path
-          scale = {"ns": 1, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
-          bench = {}
-          for m in re.finditer(
-              r'^(\S[\w/]+)\s+time:\s+\[[\d.]+ \S+ ([\d.]+) ([a-zµ]+)',
-              Path("/tmp/baseline_bench.txt").read_text(), re.M
-          ):
-              name, val, unit = m.group(1), float(m.group(2)), m.group(3)
-              bench[name] = round(val * scale.get(unit, 1))
-          e = os.environ
-          data = {
-              "pytest": {"passed": e["BL_PASSED"], "failed": e["BL_FAILED"], "duration": e["BL_DURATION"]},
-              "bench":  bench,
-          }
-          Path("/tmp/baseline.json").write_text(json.dumps(data, indent=2))
-          print(json.dumps(data, indent=2))
-          PY
+          python3 .github/scripts/package_baseline.py \
+            --bench-txt /tmp/baseline_bench.txt \
+            --out /tmp/baseline.json
 
       - name: Upload baseline artifact
         uses: actions/upload-artifact@v4
@@ -117,12 +103,12 @@ jobs:
           CARGO_REG_KEY="cargo-reg-${{ runner.os }}"
           CARGO_BUILD_KEY="cargo-build-${{ runner.os }}-$(find sqlfluffrs -name '*.rs' -o -name 'Cargo.toml' \
             | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)"
-          echo "venv=$VENV_KEY"                >> "$GITHUB_OUTPUT"
-          echo "cargo_reg=$CARGO_REG_KEY"      >> "$GITHUB_OUTPUT"
-          echo "cargo_build=$CARGO_BUILD_KEY"  >> "$GITHUB_OUTPUT"
+          echo "venv=$VENV_KEY"               >> "$GITHUB_OUTPUT"
+          echo "cargo_reg=$CARGO_REG_KEY"     >> "$GITHUB_OUTPUT"
+          echo "cargo_build=$CARGO_BUILD_KEY" >> "$GITHUB_OUTPUT"
 
       # Python venv — editable install at a fixed absolute path so all
-      # matrix runners share the same path and the install stays valid.
+      # matrix runners resolve the same source directory.
       - name: Cache Python venv
         id: venv-cache
         uses: actions/cache@v4
@@ -137,7 +123,7 @@ jobs:
           python -m venv /opt/sqlfluff-venv
           /opt/sqlfluff-venv/bin/pip install -e "." pytest pytest-xdist -q
 
-      # Cargo registry (downloaded crates) — shared, never changes mid-run.
+      # Cargo registry — downloaded crates, shared across all jobs.
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
@@ -146,8 +132,7 @@ jobs:
             ~/.cargo/git
           key: ${{ steps.keys.outputs.cargo_reg }}
 
-      # Cargo build artifacts — keyed on Rust source at HEAD so matrix jobs
-      # get a warm incremental-compilation start.
+      # Cargo build — keyed on Rust source at HEAD so matrix jobs start warm.
       - name: Cache Rust build
         id: rust-cache
         uses: actions/cache@v4
@@ -163,27 +148,13 @@ jobs:
       # ── Commit list ────────────────────────────────────────────────────────
       - name: Resolve commit range
         id: range
-        working-directory: target
         env:
           MAX_COMMITS: ${{ inputs.max_commits }}
         run: |
-          git fetch origin main --depth=200 2>/dev/null || true
-          MERGE_BASE=$(
-            git merge-base HEAD "origin/main" 2>/dev/null \
-            || git rev-parse "HEAD~${MAX_COMMITS}" 2>/dev/null \
-            || git rev-list HEAD | tail -1
-          )
-          echo "Merge-base: $MERGE_BASE"
-          COMMITS=$(
-            git log --format="%H" "${MERGE_BASE}..HEAD" \
-              | head -n "$MAX_COMMITS" | tac \
-              | python3 -c "import sys, json; print(json.dumps(sys.stdin.read().split()))"
-          )
-          TOTAL=$(echo "$COMMITS" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
-          echo "commits=$COMMITS"             >> "$GITHUB_OUTPUT"
-          echo "total=$TOTAL"                 >> "$GITHUB_OUTPUT"
-          echo "merge_base=${MERGE_BASE:0:7}" >> "$GITHUB_OUTPUT"
-          echo "Commits to benchmark: $TOTAL — $COMMITS"
+          python3 .github/scripts/list_commits.py \
+            --repo target \
+            --base-ref main \
+            --max "$MAX_COMMITS"
 
   # ── 2. One parallel job per commit ───────────────────────────────────────
   benchmark:
@@ -196,6 +167,9 @@ jobs:
     name: "${{ matrix.sha }}"
 
     steps:
+      # Checkout the workflow repo so .github/scripts/ is available.
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -209,8 +183,7 @@ jobs:
           ref: ${{ matrix.sha }}
           path: target
 
-      # Restore caches read-only — matrix jobs must not overwrite each other's
-      # cache entries, so we use cache/restore rather than cache.
+      # Restore caches read-only — matrix jobs must not overwrite each other.
       - name: Restore Python venv
         uses: actions/cache/restore@v4
         with:
@@ -238,8 +211,8 @@ jobs:
           OUT=$(/opt/sqlfluff-venv/bin/pytest test/ -m "parse_suite" -n auto -q \
                   --tb=no -p no:warnings --no-header 2>&1 || true)
           echo "$OUT"
-          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)' || echo 0)"         >> "$GITHUB_OUTPUT"
-          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)' || echo 0)"         >> "$GITHUB_OUTPUT"
+          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
+          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
           echo "duration=$(echo "$OUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
 
       - name: Run cargo bench
@@ -253,34 +226,10 @@ jobs:
           FAILED:   ${{ steps.pytest.outputs.failed }}
           DURATION: ${{ steps.pytest.outputs.duration }}
         run: |
-          python3 - << 'PY'
-          import json, re, os, subprocess
-          from pathlib import Path
-          e     = os.environ
-          sha   = e["SHA"]
-          scale = {"ns": 1, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
-          bench = {}
-          for m in re.finditer(
-              r'^(\S[\w/]+)\s+time:\s+\[[\d.]+ \S+ ([\d.]+) ([a-zµ]+)',
-              Path("/tmp/bench.txt").read_text(), re.M
-          ):
-              name, val, unit = m.group(1), float(m.group(2)), m.group(3)
-              bench[name] = round(val * scale.get(unit, 1))
-          subject = subprocess.check_output(
-              ["git", "-C", "target", "log", "-1", "--format=%s"], text=True
-          ).strip()
-          data = {
-              "sha": sha, "short": sha[:7], "subject": subject,
-              "pytest": {
-                  "passed":   int(e.get("PASSED")   or 0),
-                  "failed":   int(e.get("FAILED")   or 0),
-                  "duration": e.get("DURATION", "n/a"),
-              },
-              "bench": bench,
-          }
-          Path("/tmp/result.json").write_text(json.dumps(data, indent=2))
-          print(json.dumps(data, indent=2))
-          PY
+          python3 .github/scripts/package_result.py \
+            --bench-txt /tmp/bench.txt \
+            --repo target \
+            --out /tmp/result.json
 
       - name: Upload result artifact
         uses: actions/upload-artifact@v4
@@ -295,6 +244,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Checkout the workflow repo so .github/scripts/ is available.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -308,96 +264,5 @@ jobs:
           MERGE_BASE: ${{ needs.setup.outputs.merge_base }}
           COMMITS:    ${{ needs.setup.outputs.commits }}
         run: |
-          python3 - << 'PY'
-          import json, os
-          from pathlib import Path
-
-          e          = os.environ
-          repo       = e.get("REPOSITORY", "?")
-          branch     = e.get("BRANCH", "?")
-          total      = e.get("TOTAL", "?")
-          merge_base = e.get("MERGE_BASE", "?")
-          commits    = json.loads(e.get("COMMITS", "[]"))
-
-          # Baseline
-          bl_path  = Path("/tmp/artifacts/baseline/baseline.json")
-          baseline = json.loads(bl_path.read_text()) if bl_path.exists() else {}
-          bl_pt    = baseline.get("pytest", {})
-          bl_bench = baseline.get("bench", {})
-
-          # Commit results — load then re-order by commit list
-          result_map = {}
-          for d in Path("/tmp/artifacts").iterdir():
-              f = d / "result.json"
-              if f.exists():
-                  r = json.loads(f.read_text())
-                  result_map[r["sha"]] = r
-          results = [result_map[sha] for sha in commits if sha in result_map]
-
-          L = []
-          def a(s=""): L.append(s)
-
-          a("## Commit-Range Benchmark Report\n")
-          a("| | |")
-          a("|---|---|")
-          a(f"| **Repository** | `{repo}` |")
-          a(f"| **Branch** | `{branch}` |")
-          a(f"| **Merge-base** | `{merge_base}` |")
-          a(f"| **Commits benchmarked** | {len(results)} / {total} |")
-          a()
-
-          # ── Baseline section ───────────────────────────────────────────────
-          a("### Baseline — `rubytobi/sqlfluff@main`\n")
-          a("#### pytest `parse_suite`")
-          a(f"Passed: **{bl_pt.get('passed','?')}** &nbsp; "
-            f"Failed: **{bl_pt.get('failed','?')}** &nbsp; "
-            f"Duration: {bl_pt.get('duration','?')}")
-          if bl_bench:
-              a()
-              a("#### cargo bench")
-              a("| Benchmark | Estimate (ns) |")
-              a("|-----------|-------------:|")
-              for name, ns in sorted(bl_bench.items()):
-                  a(f"| `{name}` | {ns:,} |")
-          a()
-
-          # ── Per-commit pytest table ────────────────────────────────────────
-          if not results:
-              a("> No results collected.")
-          else:
-              a("### pytest `parse_suite` — per commit\n")
-              a("| Commit | Subject | ✅ Passed | ❌ Failed | Duration |")
-              a("|--------|---------|----------:|----------:|----------|")
-              for r in results:
-                  pt = r.get("pytest", {})
-                  a(f"| `{r['short']}` | {r.get('subject','')[:60]} "
-                    f"| {pt.get('passed','—')} | {pt.get('failed','—')} "
-                    f"| {pt.get('duration','—')} |")
-
-              # ── Per-commit cargo bench table ───────────────────────────────
-              bench_rows  = [r for r in results if r.get("bench")]
-              if bench_rows:
-                  bench_names = sorted({k for r in bench_rows for k in r["bench"]})
-                  a()
-                  a("### cargo bench — per commit (ns vs baseline)\n")
-                  a("| Commit | Subject | " + " | ".join(f"`{n}`" for n in bench_names) + " |")
-                  a("|--------|---------|" + "|".join("---:" for _ in bench_names) + "|")
-                  for r in bench_rows:
-                      cells = []
-                      for n in bench_names:
-                          ns = r["bench"].get(n)
-                          if ns is None:
-                              cells.append("—")
-                              continue
-                          bns = bl_bench.get(n)
-                          if bns:
-                              pct  = (ns - bns) / bns * 100
-                              icon = "🔺" if pct > 3 else ("🟢" if pct < -3 else "➖")
-                              cells.append(f"{ns:,} {icon} ({pct:+.1f}%)")
-                          else:
-                              cells.append(f"{ns:,}")
-                      a(f"| `{r['short']}` | {r.get('subject','')[:40]} | " + " | ".join(cells) + " |")
-
-          Path(e["GITHUB_STEP_SUMMARY"]).write_text("\n".join(L) + "\n")
-          print("Summary written.")
-          PY
+          python3 .github/scripts/write_summary.py \
+            --artifacts /tmp/artifacts
