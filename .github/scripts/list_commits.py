@@ -45,10 +45,12 @@ def main() -> None:
     if not merge_base:
         sys.exit("error: could not resolve merge-base")
 
-    # Collect commits oldest → newest.
+    # Collect branch commits oldest → newest, then prepend the merge-base so it
+    # runs in the matrix as commit 0 and serves as the comparison baseline.
     r = _run(["git", "-C", repo, "log", "--format=%H", f"{merge_base}..HEAD"])
     shas = r.stdout.split()[: args.max]
     shas.reverse()
+    shas = [merge_base] + shas
 
     commits_json = json.dumps(shas)
     short_base = merge_base[:7]

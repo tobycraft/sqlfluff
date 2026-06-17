@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Generate the GitHub Actions Job Summary from benchmark artifacts.
 
+The first entry in COMMITS is always the merge-base commit, which acts as the
+comparison baseline for all subsequent commits.
+
 Usage:
     REPOSITORY=... BRANCH=... TOTAL=N MERGE_BASE=abc1234 \\
-    COMMITS='["sha1","sha2"]' GITHUB_STEP_SUMMARY=<path> \\
+    COMMITS='["sha0","sha1","sha2"]' GITHUB_STEP_SUMMARY=<path> \\
     python3 .github/scripts/write_summary.py --artifacts <dir>
 """
 import argparse
@@ -31,13 +34,7 @@ def main() -> None:
     commits    = json.loads(e.get("COMMITS", "[]"))
     artifacts  = Path(args.artifacts)
 
-    # Load baseline artifact.
-    bl_path  = artifacts / "baseline" / "baseline.json"
-    baseline = json.loads(bl_path.read_text()) if bl_path.exists() else {}
-    bl_pt    = baseline.get("pytest", {})
-    bl_bench = baseline.get("bench", {})
-
-    # Load per-commit results and restore commit order.
+    # Load all per-commit results and restore commit order.
     result_map: dict[str, dict] = {}
     for d in artifacts.iterdir():
         f = d / "result.json"
@@ -45,6 +42,12 @@ def main() -> None:
             r = json.loads(f.read_text())
             result_map[r["sha"]] = r
     results = [result_map[sha] for sha in commits if sha in result_map]
+
+    # The merge-base (first commit) is the baseline for comparisons.
+    baseline   = results[0] if results else {}
+    bl_pt      = baseline.get("pytest", {})
+    bl_bench   = baseline.get("bench", {})
+    bl_short   = baseline.get("short", merge_base)
 
     L: list[str] = []
 
@@ -60,8 +63,8 @@ def main() -> None:
     a(f"| **Commits benchmarked** | {len(results)} / {total} |")
     a()
 
-    # ── Baseline ──────────────────────────────────────────────────────────────
-    a("### Baseline — `rubytobi/sqlfluff@main`\n")
+    # ── Baseline (merge-base) ──────────────────────────────────────────────────
+    a(f"### Baseline — merge-base `{bl_short}`\n")
     a("#### pytest `parse_suite`")
     a(
         f"Passed: **{bl_pt.get('passed', '?')}** &nbsp; "
@@ -78,13 +81,14 @@ def main() -> None:
     a()
 
     # ── Per-commit results ─────────────────────────────────────────────────────
-    if not results:
-        a("> No results collected.")
+    branch_results = results[1:]  # exclude baseline row from comparison tables
+    if not branch_results:
+        a("> No branch commits were benchmarked.")
     else:
         a("### pytest `parse_suite` — per commit\n")
         a("| Commit | Subject | ✅ Passed | ❌ Failed | Duration |")
         a("|--------|---------|----------:|----------:|----------|")
-        for r in results:
+        for r in branch_results:
             pt = r.get("pytest", {})
             a(
                 f"| `{r['short']}` | {r.get('subject', '')[:60]} "
@@ -92,11 +96,11 @@ def main() -> None:
                 f"| {pt.get('duration', '—')} |"
             )
 
-        bench_rows = [r for r in results if r.get("bench")]
+        bench_rows = [r for r in branch_results if r.get("bench")]
         if bench_rows:
             bench_names = sorted({k for r in bench_rows for k in r["bench"]})
             a()
-            a("### cargo bench — per commit (ns vs baseline)\n")
+            a(f"### cargo bench — per commit vs merge-base `{bl_short}` (ns)\n")
             a("| Commit | Subject | " + " | ".join(f"`{n}`" for n in bench_names) + " |")
             a("|--------|---------|" + "|".join("---:" for _ in bench_names) + "|")
             for r in bench_rows:

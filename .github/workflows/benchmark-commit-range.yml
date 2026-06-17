@@ -17,13 +17,15 @@ on:
         required: true
         default: 'main'
       max_commits:
-        description: 'Maximum number of commits to benchmark'
+        description: 'Maximum number of branch commits to benchmark (excluding merge-base)'
         required: false
         default: '10'
 
 jobs:
 
-  # ── 1. Baseline · cache warm-up · commit list ────────────────────────────
+  # ── 1. Cache warm-up + commit list ───────────────────────────────────────
+  # The merge-base commit is prepended to the list by list_commits.py and
+  # runs in the matrix like any other commit, acting as the baseline.
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -35,8 +37,11 @@ jobs:
       cargo_build_key: ${{ steps.keys.outputs.cargo_build }}
 
     steps:
-      # Checkout the workflow repo first so .github/scripts/ is available.
-      - uses: actions/checkout@v4
+      - name: Checkout workflow repository (scripts)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
       - uses: actions/setup-python@v5
         with:
@@ -44,49 +49,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # ── Baseline: rubytobi/sqlfluff@main ──────────────────────────────────
-      - name: Checkout baseline
-        uses: actions/checkout@v4
-        with:
-          repository: rubytobi/sqlfluff
-          ref: main
-          path: baseline
-
-      - name: Install baseline
-        working-directory: baseline
-        run: pip install -e "." pytest pytest-xdist -q
-
-      - name: Baseline pytest
-        id: bl-pytest
-        working-directory: baseline
-        run: |
-          OUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no -p no:warnings --no-header 2>&1 || true)
-          echo "$OUT"
-          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
-          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
-          echo "duration=$(echo "$OUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
-
-      - name: Baseline cargo bench
-        working-directory: baseline/sqlfluffrs
-        run: cargo bench --bench parser_bench 2>&1 | tee /tmp/baseline_bench.txt || true
-
-      - name: Package baseline results
-        env:
-          BL_PASSED:   ${{ steps.bl-pytest.outputs.passed }}
-          BL_FAILED:   ${{ steps.bl-pytest.outputs.failed }}
-          BL_DURATION: ${{ steps.bl-pytest.outputs.duration }}
-        run: |
-          python3 .github/scripts/package_baseline.py \
-            --bench-txt /tmp/baseline_bench.txt \
-            --out /tmp/baseline.json
-
-      - name: Upload baseline artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: baseline
-          path: /tmp/baseline.json
-
-      # ── Target repo ────────────────────────────────────────────────────────
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -145,7 +107,6 @@ jobs:
         working-directory: target/sqlfluffrs
         run: cargo bench --bench parser_bench --no-run 2>&1
 
-      # ── Commit list ────────────────────────────────────────────────────────
       - name: Resolve commit range
         id: range
         env:
@@ -156,7 +117,7 @@ jobs:
             --base-ref main \
             --max "$MAX_COMMITS"
 
-  # ── 2. One parallel job per commit ───────────────────────────────────────
+  # ── 2. One parallel job per commit (including merge-base as commit 0) ────
   benchmark:
     needs: setup
     strategy:
@@ -167,12 +128,11 @@ jobs:
     name: "${{ matrix.sha }}"
 
     steps:
-      # Checkout the workflow repo so .github/scripts/ is available.
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - name: Checkout workflow repository (scripts)
+        uses: actions/checkout@v4
         with:
-          python-version: '3.12'
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -198,11 +158,14 @@ jobs:
             ~/.cargo/git
           key: ${{ needs.setup.outputs.cargo_reg_key }}
 
+      # restore-keys fallback ensures older commits with slightly different
+      # Rust source still get a warm incremental-compilation start.
       - name: Restore Rust build
         uses: actions/cache/restore@v4
         with:
           path: target/sqlfluffrs/target
           key: ${{ needs.setup.outputs.cargo_build_key }}
+          restore-keys: cargo-build-${{ runner.os }}-
 
       - name: Run pytest
         id: pytest
@@ -211,8 +174,8 @@ jobs:
           OUT=$(/opt/sqlfluff-venv/bin/pytest test/ -m "parse_suite" -n auto -q \
                   --tb=no -p no:warnings --no-header 2>&1 || true)
           echo "$OUT"
-          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
-          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)'          || echo 0)"   >> "$GITHUB_OUTPUT"
+          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)'          || echo 0)"        >> "$GITHUB_OUTPUT"
+          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)'          || echo 0)"        >> "$GITHUB_OUTPUT"
           echo "duration=$(echo "$OUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
 
       - name: Run cargo bench
@@ -226,7 +189,7 @@ jobs:
           FAILED:   ${{ steps.pytest.outputs.failed }}
           DURATION: ${{ steps.pytest.outputs.duration }}
         run: |
-          python3 .github/scripts/package_result.py \
+          /opt/sqlfluff-venv/bin/python3 .github/scripts/package_result.py \
             --bench-txt /tmp/bench.txt \
             --repo target \
             --out /tmp/result.json
@@ -244,8 +207,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout the workflow repo so .github/scripts/ is available.
-      - uses: actions/checkout@v4
+      - name: Checkout workflow repository (scripts)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
       - uses: actions/setup-python@v5
         with:
