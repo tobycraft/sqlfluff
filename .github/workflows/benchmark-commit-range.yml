@@ -1,8 +1,8 @@
 ########################################################
 ## Commit-Range Benchmark Workflow                    ##
-## Runs existing pytests and cargo benchmarks across  ##
-## a range of commits, compared against a fixed       ##
-## baseline from rubytobi/sqlfluff@main.              ##
+## Parallelises over commits via a dynamic matrix.   ##
+## Caches are warmed once in `setup` and restored     ##
+## read-only in each parallel `benchmark` job.        ##
 ########################################################
 name: Benchmark Commit Range
 
@@ -18,36 +18,31 @@ on:
         required: true
         default: 'main'
       max_commits:
-        description: 'Maximum number of commits to iterate (oldest → newest)'
+        description: 'Maximum number of commits to benchmark'
         required: false
         default: '10'
 
 jobs:
-  benchmark:
-    name: Benchmark ${{ inputs.repository }}@${{ inputs.branch }}
+
+  # ── 1. Baseline · cache warm-up · commit list ────────────────────────────
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      commits:         ${{ steps.range.outputs.commits }}
+      total:           ${{ steps.range.outputs.total }}
+      merge_base:      ${{ steps.range.outputs.merge_base }}
+      venv_key:        ${{ steps.keys.outputs.venv }}
+      cargo_reg_key:   ${{ steps.keys.outputs.cargo_reg }}
+      cargo_build_key: ${{ steps.keys.outputs.cargo_build }}
 
     steps:
-
-      # ── Toolchains ───────────────────────────────────────────────────────────
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-reg-${{ runner.os }}
-
-      # ── Baseline: rubytobi/sqlfluff@main ────────────────────────────────────
+      # ── Baseline: rubytobi/sqlfluff@main ──────────────────────────────────
       - name: Checkout baseline
         uses: actions/checkout@v4
         with:
@@ -55,43 +50,57 @@ jobs:
           ref: main
           path: baseline
 
-      - name: Install baseline Python package
+      - name: Install baseline
         working-directory: baseline
         run: pip install -e "." pytest pytest-xdist -q
 
-      - name: Run baseline pytests
-        id: baseline-pytest
+      - name: Baseline pytest
+        id: bl-pytest
         working-directory: baseline
         run: |
-          OUTPUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no -p no:warnings --no-header 2>&1 || true)
-          echo "$OUTPUT"
-          echo "passed=$(echo "$OUTPUT" | grep -oP '\d+(?= passed)' || echo 0)" >> "$GITHUB_OUTPUT"
-          echo "failed=$(echo "$OUTPUT" | grep -oP '\d+(?= failed)' || echo 0)"  >> "$GITHUB_OUTPUT"
-          echo "duration=$(echo "$OUTPUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
+          OUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no -p no:warnings --no-header 2>&1 || true)
+          echo "$OUT"
+          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)' || echo 0)"         >> "$GITHUB_OUTPUT"
+          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)' || echo 0)"         >> "$GITHUB_OUTPUT"
+          echo "duration=$(echo "$OUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
 
-      - name: Run baseline cargo bench
+      - name: Baseline cargo bench
         working-directory: baseline/sqlfluffrs
-        run: |
-          cargo bench --bench parser_bench 2>&1 | tee /tmp/baseline_bench.txt || true
+        run: cargo bench --bench parser_bench 2>&1 | tee /tmp/baseline_bench.txt || true
 
-      - name: Parse baseline bench results
+      - name: Package baseline results
+        env:
+          BL_PASSED:   ${{ steps.bl-pytest.outputs.passed }}
+          BL_FAILED:   ${{ steps.bl-pytest.outputs.failed }}
+          BL_DURATION: ${{ steps.bl-pytest.outputs.duration }}
         run: |
           python3 - << 'PY'
-          import json, re
+          import json, re, os
+          from pathlib import Path
           scale = {"ns": 1, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
-          results = {}
-          content = open("/tmp/baseline_bench.txt").read()
+          bench = {}
           for m in re.finditer(
               r'^(\S[\w/]+)\s+time:\s+\[[\d.]+ \S+ ([\d.]+) ([a-zµ]+)',
-              content, re.M
+              Path("/tmp/baseline_bench.txt").read_text(), re.M
           ):
-              name, value, unit = m.group(1), float(m.group(2)), m.group(3)
-              results[name] = round(value * scale.get(unit, 1))
-          json.dump(results, open("/tmp/baseline_bench.json", "w"))
-          print("Baseline bench:", json.dumps(results, indent=2))
+              name, val, unit = m.group(1), float(m.group(2)), m.group(3)
+              bench[name] = round(val * scale.get(unit, 1))
+          e = os.environ
+          data = {
+              "pytest": {"passed": e["BL_PASSED"], "failed": e["BL_FAILED"], "duration": e["BL_DURATION"]},
+              "bench":  bench,
+          }
+          Path("/tmp/baseline.json").write_text(json.dumps(data, indent=2))
+          print(json.dumps(data, indent=2))
           PY
 
-      # ── Target repo ──────────────────────────────────────────────────────────
+      - name: Upload baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: /tmp/baseline.json
+
+      # ── Target repo ────────────────────────────────────────────────────────
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -100,10 +109,58 @@ jobs:
           fetch-depth: 0
           path: target
 
-      - name: Install target Python package
+      - name: Compute cache keys
+        id: keys
         working-directory: target
-        run: pip install -e "." pytest pytest-xdist -q
+        run: |
+          VENV_KEY="venv-${{ runner.os }}-$(sha256sum pyproject.toml | cut -c1-16)"
+          CARGO_REG_KEY="cargo-reg-${{ runner.os }}"
+          CARGO_BUILD_KEY="cargo-build-${{ runner.os }}-$(find sqlfluffrs -name '*.rs' -o -name 'Cargo.toml' \
+            | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)"
+          echo "venv=$VENV_KEY"                >> "$GITHUB_OUTPUT"
+          echo "cargo_reg=$CARGO_REG_KEY"      >> "$GITHUB_OUTPUT"
+          echo "cargo_build=$CARGO_BUILD_KEY"  >> "$GITHUB_OUTPUT"
 
+      # Python venv — editable install at a fixed absolute path so all
+      # matrix runners share the same path and the install stays valid.
+      - name: Cache Python venv
+        id: venv-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/sqlfluff-venv
+          key: ${{ steps.keys.outputs.venv }}
+
+      - name: Build Python venv
+        if: steps.venv-cache.outputs.cache-hit != 'true'
+        working-directory: target
+        run: |
+          python -m venv /opt/sqlfluff-venv
+          /opt/sqlfluff-venv/bin/pip install -e "." pytest pytest-xdist -q
+
+      # Cargo registry (downloaded crates) — shared, never changes mid-run.
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.keys.outputs.cargo_reg }}
+
+      # Cargo build artifacts — keyed on Rust source at HEAD so matrix jobs
+      # get a warm incremental-compilation start.
+      - name: Cache Rust build
+        id: rust-cache
+        uses: actions/cache@v4
+        with:
+          path: target/sqlfluffrs/target
+          key: ${{ steps.keys.outputs.cargo_build }}
+
+      - name: Warm Rust build
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        working-directory: target/sqlfluffrs
+        run: cargo bench --bench parser_bench --no-run 2>&1
+
+      # ── Commit list ────────────────────────────────────────────────────────
       - name: Resolve commit range
         id: range
         working-directory: target
@@ -117,130 +174,165 @@ jobs:
             || git rev-list HEAD | tail -1
           )
           echo "Merge-base: $MERGE_BASE"
-          git log --format="%H" "${MERGE_BASE}..HEAD" \
-            | head -n "$MAX_COMMITS" | tac > /tmp/commits.txt
-          TOTAL=$(wc -l < /tmp/commits.txt | tr -d ' ')
-          echo "total=$TOTAL"                   >> "$GITHUB_OUTPUT"
-          echo "merge_base=${MERGE_BASE:0:7}"   >> "$GITHUB_OUTPUT"
-          echo "Commits to benchmark: $TOTAL"
-          cat /tmp/commits.txt
+          COMMITS=$(
+            git log --format="%H" "${MERGE_BASE}..HEAD" \
+              | head -n "$MAX_COMMITS" | tac \
+              | python3 -c "import sys, json; print(json.dumps(sys.stdin.read().split()))"
+          )
+          TOTAL=$(echo "$COMMITS" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
+          echo "commits=$COMMITS"             >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL"                 >> "$GITHUB_OUTPUT"
+          echo "merge_base=${MERGE_BASE:0:7}" >> "$GITHUB_OUTPUT"
+          echo "Commits to benchmark: $TOTAL — $COMMITS"
 
-      # ── Benchmark loop ───────────────────────────────────────────────────────
-      - name: Benchmark each commit
+  # ── 2. One parallel job per commit ───────────────────────────────────────
+  benchmark:
+    needs: setup
+    strategy:
+      matrix:
+        sha: ${{ fromJson(needs.setup.outputs.commits) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    name: "${{ matrix.sha }}"
+
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Checkout commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ matrix.sha }}
+          path: target
+
+      # Restore caches read-only — matrix jobs must not overwrite each other's
+      # cache entries, so we use cache/restore rather than cache.
+      - name: Restore Python venv
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/sqlfluff-venv
+          key: ${{ needs.setup.outputs.venv_key }}
+
+      - name: Restore Cargo registry
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ needs.setup.outputs.cargo_reg_key }}
+
+      - name: Restore Rust build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/sqlfluffrs/target
+          key: ${{ needs.setup.outputs.cargo_build_key }}
+
+      - name: Run pytest
+        id: pytest
         working-directory: target
         run: |
-          > /tmp/results.jsonl
-          PREV_SHA=""
+          OUT=$(/opt/sqlfluff-venv/bin/pytest test/ -m "parse_suite" -n auto -q \
+                  --tb=no -p no:warnings --no-header 2>&1 || true)
+          echo "$OUT"
+          echo "passed=$(echo "$OUT"  | grep -oP '\d+(?= passed)' || echo 0)"         >> "$GITHUB_OUTPUT"
+          echo "failed=$(echo "$OUT"  | grep -oP '\d+(?= failed)' || echo 0)"         >> "$GITHUB_OUTPUT"
+          echo "duration=$(echo "$OUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)" >> "$GITHUB_OUTPUT"
 
-          while IFS= read -r SHA; do
-            SHORT="${SHA:0:7}"
-            SUBJECT=$(git log -1 --format="%s" "$SHA")
-            echo "::group::[$SHORT] $SUBJECT"
-            git checkout --quiet "$SHA"
+      - name: Run cargo bench
+        working-directory: target/sqlfluffrs
+        run: cargo bench --bench parser_bench 2>&1 | tee /tmp/bench.txt || true
 
-            PYTEST_PASSED="0"
-            PYTEST_FAILED="0"
-            PYTEST_DURATION="n/a"
-            BENCH_JSON="{}"
-
-            # ── pytest parse_suite ─────────────────────────────────────────
-            POUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no \
-                     -p no:warnings --no-header 2>&1 || true)
-            echo "$POUT"
-            PYTEST_PASSED=$(echo "$POUT" | grep -oP '\d+(?= passed)' || echo 0)
-            PYTEST_FAILED=$(echo "$POUT"  | grep -oP '\d+(?= failed)' || echo 0)
-            PYTEST_DURATION=$(echo "$POUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)
-
-            # ── cargo bench — only when sqlfluffrs/ changed ────────────────
-            RUST_CHANGED="false"
-            if [[ -z "$PREV_SHA" ]]; then
-              RUST_CHANGED="true"
-            elif ! git diff --quiet "$PREV_SHA" "$SHA" -- sqlfluffrs/ 2>/dev/null; then
-              RUST_CHANGED="true"
-            fi
-
-            if [[ "$RUST_CHANGED" == "true" && -d sqlfluffrs ]]; then
-              echo "Rust source changed — running cargo bench"
-              cargo bench --manifest-path sqlfluffrs/Cargo.toml --bench parser_bench \
-                2>&1 | tee /tmp/current_bench.txt || true
-
-              BENCH_JSON=$(python3 - << 'PY'
-          import json, re
+      - name: Package result
+        env:
+          SHA:      ${{ matrix.sha }}
+          PASSED:   ${{ steps.pytest.outputs.passed }}
+          FAILED:   ${{ steps.pytest.outputs.failed }}
+          DURATION: ${{ steps.pytest.outputs.duration }}
+        run: |
+          python3 - << 'PY'
+          import json, re, os, subprocess
+          from pathlib import Path
+          e     = os.environ
+          sha   = e["SHA"]
           scale = {"ns": 1, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
-          results = {}
-          content = open("/tmp/current_bench.txt").read()
+          bench = {}
           for m in re.finditer(
               r'^(\S[\w/]+)\s+time:\s+\[[\d.]+ \S+ ([\d.]+) ([a-zµ]+)',
-              content, re.M
+              Path("/tmp/bench.txt").read_text(), re.M
           ):
-              name, value, unit = m.group(1), float(m.group(2)), m.group(3)
-              results[name] = round(value * scale.get(unit, 1))
-          print(json.dumps(results))
-          PY
-              )
-            else
-              echo "Rust source unchanged — skipping cargo bench"
-            fi
-
-            # ── Append result as JSON line ─────────────────────────────────
-            SHA="$SHA" SHORT="$SHORT" SUBJECT="$SUBJECT" \
-            PYTEST_PASSED="$PYTEST_PASSED" PYTEST_FAILED="$PYTEST_FAILED" \
-            PYTEST_DURATION="$PYTEST_DURATION" \
-            BENCH_JSON="$BENCH_JSON" \
-            python3 -c "
-          import json, os
-          e = os.environ
+              name, val, unit = m.group(1), float(m.group(2)), m.group(3)
+              bench[name] = round(val * scale.get(unit, 1))
+          subject = subprocess.check_output(
+              ["git", "-C", "target", "log", "-1", "--format=%s"], text=True
+          ).strip()
           data = {
-              'sha':     e['SHA'],
-              'short':   e['SHORT'],
-              'subject': e['SUBJECT'],
-              'pytest': {
-                  'passed':   int(e.get('PYTEST_PASSED')  or 0),
-                  'failed':   int(e.get('PYTEST_FAILED')  or 0),
-                  'duration': e.get('PYTEST_DURATION', 'n/a'),
+              "sha": sha, "short": sha[:7], "subject": subject,
+              "pytest": {
+                  "passed":   int(e.get("PASSED")   or 0),
+                  "failed":   int(e.get("FAILED")   or 0),
+                  "duration": e.get("DURATION", "n/a"),
               },
-              'bench': json.loads(e.get('BENCH_JSON', '{}')),
+              "bench": bench,
           }
-          with open('/tmp/results.jsonl', 'a') as f:
-              f.write(json.dumps(data) + '\n')
-          "
+          Path("/tmp/result.json").write_text(json.dumps(data, indent=2))
+          print(json.dumps(data, indent=2))
+          PY
 
-            PREV_SHA="$SHA"
-            echo "::endgroup::"
-          done < /tmp/commits.txt
-          echo "Benchmark loop complete."
+      - name: Upload result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.sha }}
+          path: /tmp/result.json
 
-      # ── Job Summary ──────────────────────────────────────────────────────────
+  # ── 3. Collect results and write summary ─────────────────────────────────
+  summarize:
+    needs: [setup, benchmark]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+
       - name: Write job summary
-        if: always()
         env:
           REPOSITORY: ${{ inputs.repository }}
-          BRANCH: ${{ inputs.branch }}
-          TOTAL: ${{ steps.range.outputs.total }}
-          MERGE_BASE: ${{ steps.range.outputs.merge_base }}
-          BL_PASSED: ${{ steps.baseline-pytest.outputs.passed }}
-          BL_FAILED: ${{ steps.baseline-pytest.outputs.failed }}
-          BL_DURATION: ${{ steps.baseline-pytest.outputs.duration }}
+          BRANCH:     ${{ inputs.branch }}
+          TOTAL:      ${{ needs.setup.outputs.total }}
+          MERGE_BASE: ${{ needs.setup.outputs.merge_base }}
+          COMMITS:    ${{ needs.setup.outputs.commits }}
         run: |
           python3 - << 'PY'
           import json, os
           from pathlib import Path
 
-          e            = os.environ
-          repo         = e.get("REPOSITORY", "?")
-          branch       = e.get("BRANCH", "?")
-          total        = e.get("TOTAL", "?")
-          merge_base   = e.get("MERGE_BASE", "?")
-          bl_passed    = e.get("BL_PASSED", "?")
-          bl_failed    = e.get("BL_FAILED", "?")
-          bl_duration  = e.get("BL_DURATION", "?")
+          e          = os.environ
+          repo       = e.get("REPOSITORY", "?")
+          branch     = e.get("BRANCH", "?")
+          total      = e.get("TOTAL", "?")
+          merge_base = e.get("MERGE_BASE", "?")
+          commits    = json.loads(e.get("COMMITS", "[]"))
 
-          rp = Path("/tmp/results.jsonl")
-          results = [json.loads(l) for l in rp.read_text().splitlines() if l.strip()] \
-                    if rp.exists() else []
+          # Baseline
+          bl_path  = Path("/tmp/artifacts/baseline/baseline.json")
+          baseline = json.loads(bl_path.read_text()) if bl_path.exists() else {}
+          bl_pt    = baseline.get("pytest", {})
+          bl_bench = baseline.get("bench", {})
 
-          bp = Path("/tmp/baseline_bench.json")
-          baseline_bench = json.loads(bp.read_text()) if bp.exists() else {}
+          # Commit results — load then re-order by commit list
+          result_map = {}
+          for d in Path("/tmp/artifacts").iterdir():
+              f = d / "result.json"
+              if f.exists():
+                  r = json.loads(f.read_text())
+                  result_map[r["sha"]] = r
+          results = [result_map[sha] for sha in commits if sha in result_map]
 
           L = []
           def a(s=""): L.append(s)
@@ -254,20 +346,22 @@ jobs:
           a(f"| **Commits benchmarked** | {len(results)} / {total} |")
           a()
 
-          # ── Baseline ────────────────────────────────────────────────────
+          # ── Baseline section ───────────────────────────────────────────────
           a("### Baseline — `rubytobi/sqlfluff@main`\n")
           a("#### pytest `parse_suite`")
-          a(f"Passed: **{bl_passed}** &nbsp; Failed: **{bl_failed}** &nbsp; Duration: {bl_duration}")
-          if baseline_bench:
+          a(f"Passed: **{bl_pt.get('passed','?')}** &nbsp; "
+            f"Failed: **{bl_pt.get('failed','?')}** &nbsp; "
+            f"Duration: {bl_pt.get('duration','?')}")
+          if bl_bench:
               a()
               a("#### cargo bench")
               a("| Benchmark | Estimate (ns) |")
               a("|-----------|-------------:|")
-              for name, ns in sorted(baseline_bench.items()):
+              for name, ns in sorted(bl_bench.items()):
                   a(f"| `{name}` | {ns:,} |")
           a()
 
-          # ── Per-commit results ───────────────────────────────────────────
+          # ── Per-commit pytest table ────────────────────────────────────────
           if not results:
               a("> No results collected.")
           else:
@@ -276,34 +370,33 @@ jobs:
               a("|--------|---------|----------:|----------:|----------|")
               for r in results:
                   pt = r.get("pytest", {})
-                  a(f"| `{r['short']}` | {r['subject'][:60]} "
-                    f"| {pt.get('passed', '—')} | {pt.get('failed', '—')} "
-                    f"| {pt.get('duration', '—')} |")
+                  a(f"| `{r['short']}` | {r.get('subject','')[:60]} "
+                    f"| {pt.get('passed','—')} | {pt.get('failed','—')} "
+                    f"| {pt.get('duration','—')} |")
 
-              bench_rows = [r for r in results if r.get("bench")]
+              # ── Per-commit cargo bench table ───────────────────────────────
+              bench_rows  = [r for r in results if r.get("bench")]
               if bench_rows:
                   bench_names = sorted({k for r in bench_rows for k in r["bench"]})
                   a()
-                  a("### cargo bench — commits where Rust source changed\n")
-                  header = "| Commit | Subject | " + " | ".join(f"`{n}`" for n in bench_names) + " |"
-                  sep    = "|--------|---------|" + "|".join("---:" for _ in bench_names) + "|"
-                  a(header)
-                  a(sep)
+                  a("### cargo bench — per commit (ns vs baseline)\n")
+                  a("| Commit | Subject | " + " | ".join(f"`{n}`" for n in bench_names) + " |")
+                  a("|--------|---------|" + "|".join("---:" for _ in bench_names) + "|")
                   for r in bench_rows:
                       cells = []
                       for n in bench_names:
                           ns = r["bench"].get(n)
                           if ns is None:
                               cells.append("—")
+                              continue
+                          bns = bl_bench.get(n)
+                          if bns:
+                              pct  = (ns - bns) / bns * 100
+                              icon = "🔺" if pct > 3 else ("🟢" if pct < -3 else "➖")
+                              cells.append(f"{ns:,} {icon} ({pct:+.1f}%)")
                           else:
-                              bns = baseline_bench.get(n)
-                              if bns:
-                                  pct  = (ns - bns) / bns * 100
-                                  icon = "🔺" if pct > 3 else ("🟢" if pct < -3 else "➖")
-                                  cells.append(f"{ns:,} {icon} ({pct:+.1f}%)")
-                              else:
-                                  cells.append(f"{ns:,}")
-                      a(f"| `{r['short']}` | {r['subject'][:40]} | " + " | ".join(cells) + " |")
+                              cells.append(f"{ns:,}")
+                      a(f"| `{r['short']}` | {r.get('subject','')[:40]} | " + " | ".join(cells) + " |")
 
           Path(e["GITHUB_STEP_SUMMARY"]).write_text("\n".join(L) + "\n")
           print("Summary written.")
