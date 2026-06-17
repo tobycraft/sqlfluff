@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve a commit range and write results to GITHUB_OUTPUT.
+r"""Resolve a commit range and write results to GITHUB_OUTPUT.
 
 Usage:
     python3 .github/scripts/list_commits.py \
@@ -7,6 +7,7 @@ Usage:
         --base-ref <ref>  \\
         --max <n>
 """
+
 import argparse
 import json
 import os
@@ -19,9 +20,12 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def main() -> None:
+    """Resolve commit range and emit results to GITHUB_OUTPUT."""
     p = argparse.ArgumentParser()
     p.add_argument("--repo", required=True, help="Path to git repo")
-    p.add_argument("--base-ref", required=True, help="Branch to find merge-base against")
+    p.add_argument(
+        "--base-ref", required=True, help="Branch to find merge-base against"
+    )
     p.add_argument("--max", type=int, default=10, help="Maximum commits to include")
     args = p.parse_args()
 

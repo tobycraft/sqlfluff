@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package per-commit benchmark results into a JSON artifact.
+r"""Package per-commit benchmark results into a JSON artifact.
 
 Usage:
     SHA=<sha> PASSED=N FAILED=N DURATION=Xs \\
@@ -8,6 +8,7 @@ Usage:
         --repo      <path>  \\
         --out       <path>
 """
+
 import argparse
 import json
 import os
@@ -16,12 +17,11 @@ import subprocess
 from pathlib import Path
 
 _SCALE = {"ns": 1, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
-_CRITERION = re.compile(
-    r"^(\S[\w/]+)\s+time:\s+\[[\d.]+ \S+ ([\d.]+) ([a-zµ]+)", re.M
-)
+_CRITERION = re.compile(r"^(\S[\w/]+)\s+time:\s+\[[\d.]+ \S+ ([\d.]+) ([a-zµ]+)", re.M)
 
 
 def parse_criterion(text: str) -> dict[str, int]:
+    """Parse criterion benchmark output and return name→nanoseconds mapping."""
     result = {}
     for m in _CRITERION.finditer(text):
         name, val, unit = m.group(1), float(m.group(2)), m.group(3)
@@ -30,9 +30,12 @@ def parse_criterion(text: str) -> dict[str, int]:
 
 
 def main() -> None:
+    """Package benchmark + pytest results for one commit into a JSON artifact."""
     p = argparse.ArgumentParser()
     p.add_argument("--bench-txt", required=True, help="Path to cargo bench stdout")
-    p.add_argument("--repo", required=True, help="Path to git repo for commit subject lookup")
+    p.add_argument(
+        "--repo", required=True, help="Path to git repo for commit subject lookup"
+    )
     p.add_argument("--out", required=True, help="Output JSON path")
     args = p.parse_args()
 
@@ -43,12 +46,12 @@ def main() -> None:
     ).strip()
 
     data = {
-        "sha":     sha,
-        "short":   sha[:7],
+        "sha": sha,
+        "short": sha[:7],
         "subject": subject,
         "pytest": {
-            "passed":   int(os.environ.get("PASSED") or 0),
-            "failed":   int(os.environ.get("FAILED") or 0),
+            "passed": int(os.environ.get("PASSED") or 0),
+            "failed": int(os.environ.get("FAILED") or 0),
             "duration": os.environ.get("DURATION", "n/a"),
         },
         "bench": bench,

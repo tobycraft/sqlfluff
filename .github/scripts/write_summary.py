@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the GitHub Actions Job Summary from benchmark artifacts.
+r"""Generate the GitHub Actions Job Summary from benchmark artifacts.
 
 The first entry in COMMITS is always the merge-base commit, which acts as the
 comparison baseline for all subsequent commits.
@@ -9,6 +9,7 @@ Usage:
     COMMITS='["sha0","sha1","sha2"]' GITHUB_STEP_SUMMARY=<path> \\
     python3 .github/scripts/write_summary.py --artifacts <dir>
 """
+
 import argparse
 import json
 import os
@@ -22,17 +23,20 @@ def _fmt_delta(pct: float) -> str:
 
 
 def main() -> None:
+    """Read per-commit artifacts and write the GitHub Actions Job Summary."""
     p = argparse.ArgumentParser()
-    p.add_argument("--artifacts", required=True, help="Directory of downloaded artifacts")
+    p.add_argument(
+        "--artifacts", required=True, help="Directory of downloaded artifacts"
+    )
     args = p.parse_args()
 
-    e          = os.environ
-    repo       = e.get("REPOSITORY", "?")
-    branch     = e.get("BRANCH", "?")
-    total      = e.get("TOTAL", "?")
+    e = os.environ
+    repo = e.get("REPOSITORY", "?")
+    branch = e.get("BRANCH", "?")
+    total = e.get("TOTAL", "?")
     merge_base = e.get("MERGE_BASE", "?")
-    commits    = json.loads(e.get("COMMITS", "[]"))
-    artifacts  = Path(args.artifacts)
+    commits = json.loads(e.get("COMMITS", "[]"))
+    artifacts = Path(args.artifacts)
 
     # Load all per-commit results and restore commit order.
     result_map: dict[str, dict] = {}
@@ -44,10 +48,10 @@ def main() -> None:
     results = [result_map[sha] for sha in commits if sha in result_map]
 
     # The merge-base (first commit) is the baseline for comparisons.
-    baseline   = results[0] if results else {}
-    bl_pt      = baseline.get("pytest", {})
-    bl_bench   = baseline.get("bench", {})
-    bl_short   = baseline.get("short", merge_base)
+    baseline = results[0] if results else {}
+    bl_pt = baseline.get("pytest", {})
+    bl_bench = baseline.get("bench", {})
+    bl_short = baseline.get("short", merge_base)
 
     L: list[str] = []
 
@@ -101,7 +105,11 @@ def main() -> None:
             bench_names = sorted({k for r in bench_rows for k in r["bench"]})
             a()
             a(f"### cargo bench — per commit vs merge-base `{bl_short}` (ns)\n")
-            a("| Commit | Subject | " + " | ".join(f"`{n}`" for n in bench_names) + " |")
+            a(
+                "| Commit | Subject | "
+                + " | ".join(f"`{n}`" for n in bench_names)
+                + " |"
+            )
             a("|--------|---------|" + "|".join("---:" for _ in bench_names) + "|")
             for r in bench_rows:
                 cells = []

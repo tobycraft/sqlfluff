@@ -29,11 +29,11 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
-      commits:         ${{ steps.range.outputs.commits }}
-      total:           ${{ steps.range.outputs.total }}
-      merge_base:      ${{ steps.range.outputs.merge_base }}
-      venv_key:        ${{ steps.keys.outputs.venv }}
-      cargo_reg_key:   ${{ steps.keys.outputs.cargo_reg }}
+      commits: ${{ steps.range.outputs.commits }}
+      total: ${{ steps.range.outputs.total }}
+      merge_base: ${{ steps.range.outputs.merge_base }}
+      venv_key: ${{ steps.keys.outputs.venv }}
+      cargo_reg_key: ${{ steps.keys.outputs.cargo_reg }}
       cargo_build_key: ${{ steps.keys.outputs.cargo_build }}
 
     steps:
@@ -65,8 +65,8 @@ jobs:
           CARGO_REG_KEY="cargo-reg-${{ runner.os }}"
           CARGO_BUILD_KEY="cargo-build-${{ runner.os }}-$(find sqlfluffrs -name '*.rs' -o -name 'Cargo.toml' \
             | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)"
-          echo "venv=$VENV_KEY"               >> "$GITHUB_OUTPUT"
-          echo "cargo_reg=$CARGO_REG_KEY"     >> "$GITHUB_OUTPUT"
+          echo "venv=$VENV_KEY" >> "$GITHUB_OUTPUT"
+          echo "cargo_reg=$CARGO_REG_KEY" >> "$GITHUB_OUTPUT"
           echo "cargo_build=$CARGO_BUILD_KEY" >> "$GITHUB_OUTPUT"
 
       # Python venv — editable install at a fixed absolute path so all
@@ -184,9 +184,9 @@ jobs:
 
       - name: Package result
         env:
-          SHA:      ${{ matrix.sha }}
-          PASSED:   ${{ steps.pytest.outputs.passed }}
-          FAILED:   ${{ steps.pytest.outputs.failed }}
+          SHA: ${{ matrix.sha }}
+          PASSED: ${{ steps.pytest.outputs.passed }}
+          FAILED: ${{ steps.pytest.outputs.failed }}
           DURATION: ${{ steps.pytest.outputs.duration }}
         run: |
           /opt/sqlfluff-venv/bin/python3 .github/scripts/package_result.py \
@@ -225,10 +225,10 @@ jobs:
       - name: Write job summary
         env:
           REPOSITORY: ${{ inputs.repository }}
-          BRANCH:     ${{ inputs.branch }}
-          TOTAL:      ${{ needs.setup.outputs.total }}
+          BRANCH: ${{ inputs.branch }}
+          TOTAL: ${{ needs.setup.outputs.total }}
           MERGE_BASE: ${{ needs.setup.outputs.merge_base }}
-          COMMITS:    ${{ needs.setup.outputs.commits }}
+          COMMITS: ${{ needs.setup.outputs.commits }}
         run: |
           python3 .github/scripts/write_summary.py \
             --artifacts /tmp/artifacts
