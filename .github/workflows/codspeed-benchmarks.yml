@@ -12,6 +12,14 @@
 # Secrets required:
 #   CODSPEED_TOKEN – repository/organisation CodSpeed API token
 #
+# Job graph:
+#
+#   fetch-tpc-fixtures          ← downloads all 121 TPC SQL files via Rust
+#          │
+#    ┌─────┴─────┐
+#    ▼           ▼
+#  python      rust             ← both reuse the artifact; no duplicate downloads
+#
 name: CodSpeed Performance Benchmarks
 
 on:
@@ -31,55 +39,13 @@ concurrency:
 jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Python benchmarks – measured by CodSpeed via pytest-codspeed.
+  # Download TPC-H (22 queries) and TPC-DS (99 queries) fixtures via the Rust
+  # build script (sqlfluffrs_benchmarks/build.rs, --features fetch).  Fixtures
+  # are uploaded as a workflow artifact so the benchmark jobs never hit the
+  # network themselves.
   # ─────────────────────────────────────────────────────────────────────────────
-  python-benchmarks:
-    name: Python Benchmarks (wall time · memory · instructions)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout commit
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.commit_sha }}
-          fetch-depth: 1
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          cache-dependency-glob: |
-            requirements_dev.txt
-            pyproject.toml
-            constraints/*.txt
-
-      - name: Install sqlfluff and benchmark dependencies
-        run: |
-          uv pip install --system -e .
-          uv pip install --system pytest pytest-codspeed pytest-benchmark
-
-      - name: Run Python benchmarks via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/ --codspeed -v
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Rust benchmarks – measured by CodSpeed via cargo bench.
-  #
-  # NOTE: Per-benchmark granularity in CodSpeed requires replacing
-  # `criterion` with `codspeed-criterion-compat` in Cargo.toml and
-  # using `cargo codspeed build && cargo codspeed run`.
-  # Until that migration is done CodSpeed measures aggregate wall time
-  # and instruction counts for the full bench binary invocation.
-  # ─────────────────────────────────────────────────────────────────────────────
-  rust-benchmarks:
-    name: Rust Benchmarks (wall time · memory · instructions)
+  fetch-tpc-fixtures:
+    name: Fetch TPC fixtures
     runs-on: ubuntu-latest
 
     steps:
@@ -117,7 +83,123 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
-      - name: Run Rust benchmarks via CodSpeed
+      - name: Fetch TPC fixtures
+        working-directory: sqlfluffrs
+        run: cargo build -p sqlfluffrs_benchmarks --features fetch
+
+      - name: Upload TPC fixtures artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Python benchmarks – measured by CodSpeed via pytest-codspeed.
+  # Fixtures are restored from the artifact; conftest.py reads them directly
+  # without hitting the network.
+  # ─────────────────────────────────────────────────────────────────────────────
+  python-benchmarks:
+    name: Python Benchmarks (wall time · memory · instructions)
+    runs-on: ubuntu-latest
+    needs: fetch-tpc-fixtures
+
+    steps:
+      - name: Checkout commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements_dev.txt
+            pyproject.toml
+            constraints/*.txt
+
+      - name: Install sqlfluff and benchmark dependencies
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-codspeed pytest-benchmark
+
+      - name: Run Python benchmarks via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: pytest test/ --codspeed -v
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Rust benchmarks – measured by CodSpeed via cargo bench.
+  # Fixtures are restored from the artifact; no --features fetch needed at
+  # bench time because the files are already present in .cache/tpc-fixtures/.
+  #
+  # NOTE: Per-benchmark granularity in CodSpeed requires replacing
+  # `criterion` with `codspeed-criterion-compat` in Cargo.toml and
+  # using `cargo codspeed build && cargo codspeed run`.
+  # Until that migration is done CodSpeed measures aggregate wall time
+  # and instruction counts for the full bench binary invocation.
+  # ─────────────────────────────────────────────────────────────────────────────
+  rust-benchmarks:
+    name: Rust Benchmarks (wall time · memory · instructions)
+    runs-on: ubuntu-latest
+    needs: fetch-tpc-fixtures
+
+    steps:
+      - name: Checkout commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements_dev.txt
+            pyproject.toml
+            constraints/*.txt
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "sqlfluffrs"
+          cache-on-failure: true
+
+      - name: Generate Rust dialect files
+        run: |
+          uv pip install --system -e .
+          python utils/rustify.py build
+
+      - name: Run parser_bench via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
@@ -126,3 +208,12 @@ jobs:
           # (autobenches = false). baseline_phase1 and delimited_performance
           # exist as source files but are not yet registered.
           run: cargo bench --bench parser_bench
+
+      - name: Run tpc_bench via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          # No --features fetch needed: fixtures are already in .cache/tpc-fixtures/
+          # from the artifact downloaded above.
+          run: cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench
