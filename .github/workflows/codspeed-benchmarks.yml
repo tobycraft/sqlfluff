@@ -236,6 +236,9 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed
+
       - name: Run parser_bench via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
