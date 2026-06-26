@@ -26,11 +26,21 @@
 #
 # Job graph:
 #
-#   fetch-tpc-fixtures     ← always on workflow branch; uploads artifact
+#   fetch-tpc-fixtures          rust-parser-bench
+#   (uploads artifact)          (no TPC fixtures needed; starts immediately)
 #          │
-#    ┌─────┴─────┐
-#    ▼           ▼
-#  python      rust        ← both download artifact; no duplicate fetches
+#    ┌─────┴────────────────────┐
+#    ▼                          ▼
+#  python-benchmarks         rust-tpc-benchmarks
+#  (matrix × 4 in parallel)  (matrix × 4 in parallel)
+#  test_lex_tpch              lex_tpch_22
+#  test_parse_tpch            parse_tpch_22
+#  test_lex_tpcds             lex_tpcds_99
+#  test_parse_tpcds           parse_tpcds_99
+#
+# Each benchmark is its own job so its Valgrind callgraph is processed in
+# isolation.  Running all four TPC tests in one job accumulates ~80 min of
+# callgrind data, which overflows the CodSpeed runner and causes exit 139.
 #
 name: CodSpeed Performance Benchmarks
 
@@ -108,16 +118,24 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Python benchmarks.
+  # Python benchmarks — one matrix job per benchmark.
   #
   # Benchmark infrastructure (test files, conftest.py) comes from the workflow
   # branch.  The sqlfluff library under test is installed from commit_sha so
   # that we are measuring that commit's performance, not HEAD's.
   # ─────────────────────────────────────────────────────────────────────────────
   python-benchmarks:
-    name: Python Benchmarks (instructions)
+    name: Python – ${{ matrix.benchmark }}
     runs-on: ubuntu-latest
     needs: fetch-tpc-fixtures
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark:
+          - test_lex_tpch
+          - test_parse_tpch
+          - test_lex_tpcds
+          - test_parse_tpcds
 
     steps:
       - name: Checkout workflow branch (benchmark infrastructure)
@@ -160,51 +178,94 @@ jobs:
       - name: Install benchmark dependencies
         run: uv pip install --system pytest pytest-codspeed pytest-benchmark
 
-      # Run each benchmark in its own CodSpeed step so the Valgrind callgraph
-      # is processed per-benchmark rather than all at once.  A single run that
-      # covers all four TPC tests accumulates ~80 min of callgrind data, which
-      # overflows the runner's memory and causes a segfault (exit 139).
-      - name: Benchmark lex_tpch via CodSpeed
+      - name: Benchmark via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/benchmarks/ -k test_lex_tpch --codspeed -v
-
-      - name: Benchmark parse_tpch via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/benchmarks/ -k test_parse_tpch --codspeed -v
-
-      - name: Benchmark lex_tpcds via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/benchmarks/ -k test_lex_tpcds --codspeed -v
-
-      - name: Benchmark parse_tpcds via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/benchmarks/ -k test_parse_tpcds --codspeed -v
+          run: pytest test/benchmarks/ -k ${{ matrix.benchmark }} --codspeed -v
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust benchmarks.
+  # Rust parser_bench.
+  #
+  # Benchmarks simple and complex SQL queries through the Rust parser.
+  # Uses only committed fixture files (test/fixtures/dialects/ansi/), so it
+  # does not depend on fetch-tpc-fixtures and can start immediately.
+  # ─────────────────────────────────────────────────────────────────────────────
+  rust-parser-bench:
+    name: Rust – parser_bench
+    runs-on: ubuntu-latest
+    # No needs: parser_bench uses committed fixtures, not TPC downloads.
+
+    steps:
+      - name: Checkout target commit (Rust source under test)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements_dev.txt
+            pyproject.toml
+            constraints/*.txt
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "sqlfluffrs"
+          cache-on-failure: true
+
+      - name: Generate Rust dialect files
+        run: |
+          uv pip install --system -e .
+          python utils/rustify.py build
+
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed
+
+      - name: Benchmark parser_bench via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo codspeed build --bench parser_bench && cargo codspeed run --bench parser_bench
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Rust tpc_bench — one matrix job per benchmark.
   #
   # The Rust source to compile comes from commit_sha.  build.rs is overlaid
   # from the workflow branch so that TPC_FIXTURES_DIR always resolves to
   # .cache/tpc-fixtures/ regardless of what the old commit's build.rs did.
   # If sqlfluffrs_benchmarks or tpc_bench did not exist in the target commit,
-  # that step is skipped gracefully.
+  # continue-on-error lets the remaining matrix jobs still report results.
   #
-  # codspeed-criterion-compat is a drop-in replacement for criterion that
-  # gives per-benchmark granularity in CodSpeed (instruction counts per
-  # individual bench function, not just the whole binary).
+  # The filter after -- is passed to the criterion binary so only the named
+  # benchmark function runs under Valgrind.
   # ─────────────────────────────────────────────────────────────────────────────
-  rust-benchmarks:
-    name: Rust Benchmarks (instructions)
+  rust-tpc-benchmarks:
+    name: Rust – ${{ matrix.benchmark }}
     runs-on: ubuntu-latest
     needs: fetch-tpc-fixtures
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark:
+          - lex_tpch_22
+          - parse_tpch_22
+          - lex_tpcds_99
+          - parse_tpcds_99
 
     steps:
       - name: Checkout target commit (Rust source under test)
@@ -261,50 +322,10 @@ jobs:
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed
 
-      - name: Benchmark parser_bench via CodSpeed
+      - name: Benchmark via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
-          run: cargo codspeed build --bench parser_bench && cargo codspeed run --bench parser_bench
-
-      # Build tpc_bench once; each run step below re-uses the cached binary.
-      # tpc_bench and sqlfluffrs_benchmarks may not exist in older commits, so
-      # all four steps are continue-on-error.
-      - name: Build tpc_bench
-        continue-on-error: true
-        working-directory: sqlfluffrs
-        # No --features fetch: fixtures are already in .cache/tpc-fixtures/
-        run: cargo codspeed build -p sqlfluffrs_benchmarks --bench tpc_bench
-
-      - name: Benchmark tpch/lex_tpch_22 via CodSpeed
-        continue-on-error: true
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- lex_tpch_22
-
-      - name: Benchmark tpch/parse_tpch_22 via CodSpeed
-        continue-on-error: true
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- parse_tpch_22
-
-      - name: Benchmark tpcds/lex_tpcds_99 via CodSpeed
-        continue-on-error: true
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- lex_tpcds_99
-
-      - name: Benchmark tpcds/parse_tpcds_99 via CodSpeed
-        continue-on-error: true
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- parse_tpcds_99
+          # No --features fetch: fixtures are already in .cache/tpc-fixtures/
+          run: cargo codspeed build -p sqlfluffrs_benchmarks --bench tpc_bench && cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- ${{ matrix.benchmark }}
