@@ -36,9 +36,8 @@ fn main() {
 
     // Resolve the workspace root from CARGO_MANIFEST_DIR (this crate's dir is
     // sqlfluffrs/sqlfluffrs_benchmarks/, so the workspace root is two levels up).
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
-    );
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let fixtures_dir = manifest_dir
         .parent() // sqlfluffrs/
         .and_then(|p| p.parent()) // repo root
