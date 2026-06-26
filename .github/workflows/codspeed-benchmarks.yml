@@ -117,23 +117,12 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
-      - name: Run parser_bench via CodSpeed
+      - name: Run Rust benchmarks via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
+          # Only parser_bench is declared as a [[bench]] target in Cargo.toml
+          # (autobenches = false). baseline_phase1 and delimited_performance
+          # exist as source files but are not yet registered.
           run: cargo bench --bench parser_bench
-
-      - name: Run baseline_phase1 via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo bench --bench baseline_phase1
-
-      - name: Run delimited_performance via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo bench --bench delimited_performance
