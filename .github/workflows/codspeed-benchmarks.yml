@@ -2,9 +2,21 @@
 ## CodSpeed Performance Benchmarks  ##
 ######################################
 #
-# Manually triggered workflow that checks out a specific commit and runs
-# CodSpeed benchmarks to measure wall time, memory consumption, and
-# instruction counts.
+# Manually triggered workflow that benchmarks a specific commit against the
+# benchmark infrastructure on this branch.
+#
+# Key design principle
+# ─────────────────────
+# Two concerns are kept strictly separate:
+#
+#   • Benchmark infrastructure (test files, build.rs, this workflow)
+#     → always taken from the HEAD of this workflow's branch.
+#
+#   • Library under test (Python package, Rust source to compile)
+#     → taken from commit_sha.
+#
+# This means the benchmarks can be run against any old commit, even ones that
+# pre-date the test files, pytest-codspeed, or the shared .cache fixture path.
 #
 # Usage (GitHub UI → Actions → CodSpeed Performance Benchmarks → Run workflow):
 #   commit_sha: the full or abbreviated SHA to benchmark, e.g. "abc1234"
@@ -14,11 +26,11 @@
 #
 # Job graph:
 #
-#   fetch-tpc-fixtures          ← downloads all 121 TPC SQL files via Rust
+#   fetch-tpc-fixtures     ← always on workflow branch; uploads artifact
 #          │
 #    ┌─────┴─────┐
 #    ▼           ▼
-#  python      rust             ← both reuse the artifact; no duplicate downloads
+#  python      rust        ← both download artifact; no duplicate fetches
 #
 name: CodSpeed Performance Benchmarks
 
@@ -39,20 +51,21 @@ concurrency:
 jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Download TPC-H (22 queries) and TPC-DS (99 queries) fixtures via the Rust
-  # build script (sqlfluffrs_benchmarks/build.rs, --features fetch).  Fixtures
-  # are uploaded as a workflow artifact so the benchmark jobs never hit the
-  # network themselves.
+  # Fetch TPC-H (22 queries) and TPC-DS (99 queries) via the Rust build script
+  # on this branch.  Always runs against the workflow branch HEAD — never the
+  # target SHA — so build.rs is always the version that writes to
+  # .cache/tpc-fixtures/ (the shared location).
   # ─────────────────────────────────────────────────────────────────────────────
   fetch-tpc-fixtures:
     name: Fetch TPC fixtures
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout commit
+      - name: Checkout workflow branch
         uses: actions/checkout@v6
+        # No ref: defaults to the branch HEAD that triggered this workflow,
+        # i.e. the benchmark infrastructure branch — not the target SHA.
         with:
-          ref: ${{ inputs.commit_sha }}
           fetch-depth: 1
 
       - name: Set up Python 3.12
@@ -95,9 +108,11 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Python benchmarks – measured by CodSpeed via pytest-codspeed.
-  # Fixtures are restored from the artifact; conftest.py reads them directly
-  # without hitting the network.
+  # Python benchmarks.
+  #
+  # Benchmark infrastructure (test files, conftest.py) comes from the workflow
+  # branch.  The sqlfluff library under test is installed from commit_sha so
+  # that we are measuring that commit's performance, not HEAD's.
   # ─────────────────────────────────────────────────────────────────────────────
   python-benchmarks:
     name: Python Benchmarks (wall time · memory · instructions)
@@ -105,10 +120,17 @@ jobs:
     needs: fetch-tpc-fixtures
 
     steps:
-      - name: Checkout commit
+      - name: Checkout workflow branch (benchmark infrastructure)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+        # No ref: gives us test/benchmarks/ and conftest.py from this branch.
+
+      - name: Checkout target commit (library under test)
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.commit_sha }}
+          path: target-sqlfluff
           fetch-depth: 1
 
       - name: Download TPC fixtures
@@ -131,21 +153,27 @@ jobs:
             pyproject.toml
             constraints/*.txt
 
-      - name: Install sqlfluff and benchmark dependencies
-        run: |
-          uv pip install --system -e .
-          uv pip install --system pytest pytest-codspeed pytest-benchmark
+      - name: Install sqlfluff from target commit
+        # Install the old library; current test files will import it.
+        run: uv pip install --system ./target-sqlfluff
+
+      - name: Install benchmark dependencies
+        run: uv pip install --system pytest pytest-codspeed pytest-benchmark
 
       - name: Run Python benchmarks via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/ --codspeed -v
+          run: pytest test/benchmarks/ --codspeed -v
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust benchmarks – measured by CodSpeed via cargo bench.
-  # Fixtures are restored from the artifact; no --features fetch needed at
-  # bench time because the files are already present in .cache/tpc-fixtures/.
+  # Rust benchmarks.
+  #
+  # The Rust source to compile comes from commit_sha.  build.rs is overlaid
+  # from the workflow branch so that TPC_FIXTURES_DIR always resolves to
+  # .cache/tpc-fixtures/ regardless of what the old commit's build.rs did.
+  # If sqlfluffrs_benchmarks or tpc_bench did not exist in the target commit,
+  # that step is skipped gracefully.
   #
   # NOTE: Per-benchmark granularity in CodSpeed requires replacing
   # `criterion` with `codspeed-criterion-compat` in Cargo.toml and
@@ -159,11 +187,22 @@ jobs:
     needs: fetch-tpc-fixtures
 
     steps:
-      - name: Checkout commit
+      - name: Checkout target commit (Rust source under test)
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 1
+
+      - name: Overlay current build.rs for fixture path compatibility
+        # Ensures TPC_FIXTURES_DIR is baked in as .cache/tpc-fixtures/ even
+        # when the target commit pre-dates the shared cache path in build.rs.
+        run: |
+          git fetch origin ${{ github.ref_name }} --depth=1
+          git checkout FETCH_HEAD -- sqlfluffrs/sqlfluffrs_benchmarks/build.rs
+        # If sqlfluffrs_benchmarks doesn't exist in the target commit,
+        # the checkout above will fail; tpc_bench will also fail below.
+        # Both are allowed to fail — parser_bench is the stable target.
+        continue-on-error: true
 
       - name: Download TPC fixtures
         uses: actions/download-artifact@v4
@@ -204,16 +243,15 @@ jobs:
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
-          # Only parser_bench is declared as a [[bench]] target in Cargo.toml
-          # (autobenches = false). baseline_phase1 and delimited_performance
-          # exist as source files but are not yet registered.
+          # parser_bench is the stable target present in all recent commits.
           run: cargo bench --bench parser_bench
 
       - name: Run tpc_bench via CodSpeed
+        # tpc_bench and sqlfluffrs_benchmarks may not exist in older commits.
+        continue-on-error: true
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
-          # No --features fetch needed: fixtures are already in .cache/tpc-fixtures/
-          # from the artifact downloaded above.
+          # No --features fetch: fixtures are already in .cache/tpc-fixtures/
           run: cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench
