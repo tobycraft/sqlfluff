@@ -33,10 +33,10 @@
 #    ▼                          ▼
 #  python-benchmarks         rust-tpc-benchmarks
 #  (matrix × 4 in parallel)  (matrix × 4 in parallel)
-#  test_lex_tpch              lex_tpch_22
-#  test_parse_tpch            parse_tpch_22
-#  test_lex_tpcds             lex_tpcds_99
-#  test_parse_tpcds           parse_tpcds_99
+#  test_lex_tpch              lex_tpch
+#  test_parse_tpch            parse_tpch
+#  test_lex_tpcds             lex_tpcds
+#  test_parse_tpcds           parse_tpcds
 #
 # Each benchmark is its own job so its Valgrind callgraph is processed in
 # isolation.  Running all four TPC tests in one job accumulates ~80 min of
@@ -262,10 +262,10 @@ jobs:
       fail-fast: false
       matrix:
         benchmark:
-          - lex_tpch_22
-          - parse_tpch_22
-          - lex_tpcds_22
-          - parse_tpcds_22
+          - lex_tpch
+          - parse_tpch
+          - lex_tpcds
+          - parse_tpcds
 
     steps:
       - name: Checkout target commit (Rust source under test)
