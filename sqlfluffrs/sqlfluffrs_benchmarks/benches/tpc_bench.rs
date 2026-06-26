@@ -10,7 +10,7 @@
 ///
 /// Run only TPC-H:
 ///   cargo bench -p sqlfluffrs_benchmarks --features fetch -- tpch
-use criterion::{criterion_group, criterion_main, Criterion};
+use codspeed_criterion_compat::{criterion_group, criterion_main, Criterion};
 
 use sqlfluffrs_benchmarks::{tpc_fixture, TPCDS_N, TPCH_N};
 use sqlfluffrs_dialects::dialect::ansi::matcher::ANSI_LEXERS;

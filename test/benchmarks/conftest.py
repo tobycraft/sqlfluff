@@ -32,19 +32,23 @@ def _load_tpcds() -> list[str]:
 
 @pytest.fixture(scope="session")
 def tpch_sqls() -> list[str]:
+    """All 22 TPC-H query strings, pre-fetched into .cache/tpc-fixtures/."""
     return _load_tpch()
 
 
 @pytest.fixture(scope="session")
 def tpcds_sqls() -> list[str]:
+    """All 99 TPC-DS query strings, pre-fetched into .cache/tpc-fixtures/."""
     return _load_tpcds()
 
 
 @pytest.fixture(scope="session")
 def ansi_lexer() -> Generator[Lexer, None, None]:
+    """ANSI dialect Lexer instance, shared across the session."""
     yield Lexer(config=FluffConfig(overrides={"dialect": "ansi"}))
 
 
 @pytest.fixture(scope="session")
 def ansi_linter() -> Generator[Linter, None, None]:
+    """ANSI dialect Linter instance, shared across the session."""
     yield Linter(config=FluffConfig(overrides={"dialect": "ansi"}))

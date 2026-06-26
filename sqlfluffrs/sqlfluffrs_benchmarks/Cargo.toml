@@ -24,7 +24,7 @@ sqlfluffrs_dialects = { path = "../sqlfluffrs_dialects" }
 sqlfluffrs_parser = { path = "../sqlfluffrs_parser" }
 
 [dev-dependencies]
-criterion = "0.8.2"
+codspeed-criterion-compat = "2"
 
 [build-dependencies]
 # Lightweight, blocking HTTP client (rustls, no OpenSSL) used only to fetch

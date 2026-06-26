@@ -175,11 +175,9 @@ jobs:
   # If sqlfluffrs_benchmarks or tpc_bench did not exist in the target commit,
   # that step is skipped gracefully.
   #
-  # NOTE: Per-benchmark granularity in CodSpeed requires replacing
-  # `criterion` with `codspeed-criterion-compat` in Cargo.toml and
-  # using `cargo codspeed build && cargo codspeed run`.
-  # Until that migration is done CodSpeed measures aggregate wall time
-  # and instruction counts for the full bench binary invocation.
+  # codspeed-criterion-compat is a drop-in replacement for criterion that
+  # gives per-benchmark granularity in CodSpeed (instruction counts per
+  # individual bench function, not just the whole binary).
   # ─────────────────────────────────────────────────────────────────────────────
   rust-benchmarks:
     name: Rust Benchmarks (wall time · memory · instructions)
@@ -243,8 +241,7 @@ jobs:
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
-          # parser_bench is the stable target present in all recent commits.
-          run: cargo bench --bench parser_bench
+          run: cargo codspeed build --bench parser_bench && cargo codspeed run --bench parser_bench
 
       - name: Run tpc_bench via CodSpeed
         # tpc_bench and sqlfluffrs_benchmarks may not exist in older commits.
@@ -254,4 +251,4 @@ jobs:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
           # No --features fetch: fixtures are already in .cache/tpc-fixtures/
-          run: cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench
+          run: cargo codspeed build -p sqlfluffrs_benchmarks --bench tpc_bench && cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench
