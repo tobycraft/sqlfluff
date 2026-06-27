@@ -23,11 +23,11 @@ from sqlfluff.core.linter import Linter
 from sqlfluff.core.parser import Lexer
 
 # Query indices (0-based) — injectable via env vars for ad-hoc testing.
-# Defaults are deterministically chosen with a fixed seed:
-#   random.Random(0).randrange(22) → 12  (TPC-H Q13)
-#   random.Random(0).randrange(99) → 49  (TPC-DS Q50)
+# TPC-H default: random.Random(0).randrange(22) → 12  (Q13)
+# TPC-DS default: Q1 (index 0) — one of the shortest queries; avoids
+#   CodSpeed runner OOM segfault that Q50 triggers on the parse benchmark.
 _TPCH_IDX = int(os.environ.get("TPCH_QUERY_IDX", random.Random(0).randrange(22)))
-_TPCDS_IDX = int(os.environ.get("TPCDS_QUERY_IDX", random.Random(0).randrange(99)))
+_TPCDS_IDX = int(os.environ.get("TPCDS_QUERY_IDX", 0))
 
 
 def test_lex_tpch(benchmark, ansi_lexer: Lexer, tpch_sqls: list[str]):

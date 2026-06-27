@@ -30,10 +30,11 @@ use std::path::Path;
 use std::time::Duration;
 
 // Default query indices (1-based) matching Python defaults:
-//   random.Random(0).randrange(22) → 12 (0-based) → Q13
-//   random.Random(0).randrange(99) → 49 (0-based) → Q50
+//   TPC-H:  random.Random(0).randrange(22) → 12 (0-based) → Q13
+//   TPC-DS: Q1 — one of the shortest queries; avoids CodSpeed runner OOM
+//           segfault that Q50 triggers on the parse benchmark.
 const DEFAULT_TPCH_Q: u32 = 13;
-const DEFAULT_TPCDS_Q: u32 = 50;
+const DEFAULT_TPCDS_Q: u32 = 1;
 
 fn read_file(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
