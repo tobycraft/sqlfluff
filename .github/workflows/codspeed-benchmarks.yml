@@ -27,12 +27,14 @@
 #          │                    │
 #          └──────────┬─────────┘
 #                     ▼
-#          Python fan-out (40 jobs in parallel):       rust-tpc-benchmarks
-#          test_lex_tpch   × 10 queries (Q0–Q9)        (4 jobs in parallel)
-#          test_parse_tpch × 10 queries (Q0–Q9)        lex_tpch
-#          test_lex_tpcds  × 10 queries (Q0–Q9)        parse_tpch
-#          test_parse_tpcds× 10 queries (Q0–Q9)        lex_tpcds
-#                     │                               parse_tpcds
+#          Python fan-out (80 jobs in parallel):       rust-tpc-benchmarks
+#          callgrind (instructions) × 10 queries each  (4 jobs in parallel)
+#            test_lex_tpch / test_parse_tpch            lex_tpch
+#            test_lex_tpcds / test_parse_tpcds           parse_tpch
+#          massif (peak heap) × 10 queries each         lex_tpcds
+#            test_lex_tpch-mem / test_parse_tpch-mem    parse_tpcds
+#            test_lex_tpcds-mem / test_parse_tpcds-mem
+#                     │
 #                     └──────────────┬────────────────┘
 #                                    ▼
 #                             bench-summary
@@ -450,6 +452,288 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Python memory fan-out — Valgrind massif.
+  #
+  # Mirrors the callgrind fan-out above but uses --tool=massif to collect
+  # heap-allocation statistics.  Each job records the peak heap bytes for a
+  # single query and uploads a stat file consumed by bench-summary.
+  #
+  # Stat files are named python-mem-test_{bench}-q{N}.txt so that the
+  # bench-summary parser can distinguish them from instruction stat files.
+  # ─────────────────────────────────────────────────────────────────────────────
+  python-lex-tpch-mem:
+    name: Python – test_lex_tpch Q${{ matrix.query_idx }} (mem)
+    runs-on: ubuntu-latest
+    needs: [fetch-tpc-fixtures, python-bench-prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - name: Checkout workflow branch (benchmark infrastructure)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Restore benchmark virtual environment
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench-venv
+          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
+          fail-on-cache-miss: true
+
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Run benchmark under Valgrind massif
+        env:
+          TPCH_QUERY_IDX: ${{ matrix.query_idx }}
+        run: |
+          mkdir -p /tmp/massif
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+          valgrind -q \
+            --tool=massif \
+            --massif-out-file=/tmp/massif/massif.out \
+            --pages-as-heap=no \
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpch \
+              -v --benchmark-disable -p no:codspeed
+
+      - name: Save peak-heap summary
+        if: always()
+        run: |
+          mkdir -p /tmp/bench-stats
+          {
+            echo "Benchmark: test_lex_tpch Q${{ matrix.query_idx }} (peak heap)"
+            peak=$(grep '^mem_heap_B=' /tmp/massif/massif.out | cut -d= -f2 | sort -n | tail -1)
+            awk -v n="${peak:-0}" 'BEGIN { printf "Peak heap B: %'"'"'d\n", n }'
+          } | tee /tmp/bench-stats/python-mem-test_lex_tpch-q${{ matrix.query_idx }}.txt
+          echo "──────────────────────────────────────"
+
+      - name: Upload bench stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-python-mem-test_lex_tpch-q${{ matrix.query_idx }}
+          path: /tmp/bench-stats/python-mem-test_lex_tpch-q${{ matrix.query_idx }}.txt
+          if-no-files-found: warn
+
+  python-parse-tpch-mem:
+    name: Python – test_parse_tpch Q${{ matrix.query_idx }} (mem)
+    runs-on: ubuntu-latest
+    needs: [fetch-tpc-fixtures, python-bench-prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - name: Checkout workflow branch (benchmark infrastructure)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Restore benchmark virtual environment
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench-venv
+          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
+          fail-on-cache-miss: true
+
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Run benchmark under Valgrind massif
+        env:
+          TPCH_QUERY_IDX: ${{ matrix.query_idx }}
+        run: |
+          mkdir -p /tmp/massif
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+          valgrind -q \
+            --tool=massif \
+            --massif-out-file=/tmp/massif/massif.out \
+            --pages-as-heap=no \
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpch \
+              -v --benchmark-disable -p no:codspeed
+
+      - name: Save peak-heap summary
+        if: always()
+        run: |
+          mkdir -p /tmp/bench-stats
+          {
+            echo "Benchmark: test_parse_tpch Q${{ matrix.query_idx }} (peak heap)"
+            peak=$(grep '^mem_heap_B=' /tmp/massif/massif.out | cut -d= -f2 | sort -n | tail -1)
+            awk -v n="${peak:-0}" 'BEGIN { printf "Peak heap B: %'"'"'d\n", n }'
+          } | tee /tmp/bench-stats/python-mem-test_parse_tpch-q${{ matrix.query_idx }}.txt
+          echo "──────────────────────────────────────"
+
+      - name: Upload bench stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-python-mem-test_parse_tpch-q${{ matrix.query_idx }}
+          path: /tmp/bench-stats/python-mem-test_parse_tpch-q${{ matrix.query_idx }}.txt
+          if-no-files-found: warn
+
+  python-lex-tpcds-mem:
+    name: Python – test_lex_tpcds Q${{ matrix.query_idx }} (mem)
+    runs-on: ubuntu-latest
+    needs: [fetch-tpc-fixtures, python-bench-prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - name: Checkout workflow branch (benchmark infrastructure)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Restore benchmark virtual environment
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench-venv
+          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
+          fail-on-cache-miss: true
+
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Run benchmark under Valgrind massif
+        env:
+          TPCDS_QUERY_IDX: ${{ matrix.query_idx }}
+        run: |
+          mkdir -p /tmp/massif
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+          valgrind -q \
+            --tool=massif \
+            --massif-out-file=/tmp/massif/massif.out \
+            --pages-as-heap=no \
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpcds \
+              -v --benchmark-disable -p no:codspeed
+
+      - name: Save peak-heap summary
+        if: always()
+        run: |
+          mkdir -p /tmp/bench-stats
+          {
+            echo "Benchmark: test_lex_tpcds Q${{ matrix.query_idx }} (peak heap)"
+            peak=$(grep '^mem_heap_B=' /tmp/massif/massif.out | cut -d= -f2 | sort -n | tail -1)
+            awk -v n="${peak:-0}" 'BEGIN { printf "Peak heap B: %'"'"'d\n", n }'
+          } | tee /tmp/bench-stats/python-mem-test_lex_tpcds-q${{ matrix.query_idx }}.txt
+          echo "──────────────────────────────────────"
+
+      - name: Upload bench stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-python-mem-test_lex_tpcds-q${{ matrix.query_idx }}
+          path: /tmp/bench-stats/python-mem-test_lex_tpcds-q${{ matrix.query_idx }}.txt
+          if-no-files-found: warn
+
+  python-parse-tpcds-mem:
+    name: Python – test_parse_tpcds Q${{ matrix.query_idx }} (mem)
+    runs-on: ubuntu-latest
+    needs: [fetch-tpc-fixtures, python-bench-prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - name: Checkout workflow branch (benchmark infrastructure)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Restore benchmark virtual environment
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench-venv
+          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
+          fail-on-cache-miss: true
+
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Run benchmark under Valgrind massif
+        env:
+          TPCDS_QUERY_IDX: ${{ matrix.query_idx }}
+        run: |
+          mkdir -p /tmp/massif
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+          valgrind -q \
+            --tool=massif \
+            --massif-out-file=/tmp/massif/massif.out \
+            --pages-as-heap=no \
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpcds \
+              -v --benchmark-disable -p no:codspeed
+
+      - name: Save peak-heap summary
+        if: always()
+        run: |
+          mkdir -p /tmp/bench-stats
+          {
+            echo "Benchmark: test_parse_tpcds Q${{ matrix.query_idx }} (peak heap)"
+            peak=$(grep '^mem_heap_B=' /tmp/massif/massif.out | cut -d= -f2 | sort -n | tail -1)
+            awk -v n="${peak:-0}" 'BEGIN { printf "Peak heap B: %'"'"'d\n", n }'
+          } | tee /tmp/bench-stats/python-mem-test_parse_tpcds-q${{ matrix.query_idx }}.txt
+          echo "──────────────────────────────────────"
+
+      - name: Upload bench stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-python-mem-test_parse_tpcds-q${{ matrix.query_idx }}
+          path: /tmp/bench-stats/python-mem-test_parse_tpcds-q${{ matrix.query_idx }}.txt
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Rust parser_bench — iai-callgrind.
   #
   # iai-callgrind manages Valgrind internally: it builds the bench binary, then
@@ -622,7 +906,7 @@ jobs:
   bench-summary:
     name: Benchmark Summary
     runs-on: ubuntu-latest
-    needs: [python-lex-tpch, python-parse-tpch, python-lex-tpcds, python-parse-tpcds, rust-parser-bench, rust-tpc-benchmarks]
+    needs: [python-lex-tpch, python-parse-tpch, python-lex-tpcds, python-parse-tpcds, python-lex-tpch-mem, python-parse-tpch-mem, python-lex-tpcds-mem, python-parse-tpcds-mem, rust-parser-bench, rust-tpc-benchmarks]
     if: always()
 
     steps:
@@ -670,9 +954,11 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # ── Plain-text table → log ─────────────────────────────────────
+          # ── Plain-text instructions table → log ───────────────────────
           W=13
           echo "═══════════════════════════════════════════════════════════════"
+          echo "                  Instructions (callgrind)"
+          echo "───────────────────────────────────────────────────────────────"
           printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
             "Q" "lex_tpch" "parse_tpch" "lex_tpcds" "parse_tpcds"
           echo "───────────────────────────────────────────────────────────────"
@@ -685,6 +971,57 @@ jobs:
               "${data[test_parse_tpcds|${q}]:-—}"
           done
           echo "═══════════════════════════════════════════════════════════════"
+
+          # ── Parse Python memory stat files ────────────────────────────
+          declare -A mem_data
+          for f in bench-stats/python-mem-test_*-q*.txt; do
+            base=$(basename "$f" .txt)          # python-mem-test_lex_tpch-q0
+            bench="${base#python-mem-}"          # test_lex_tpch-q0
+            q="${bench##*-q}"                    # 0
+            bench="${bench%-q*}"                 # test_lex_tpch
+            peak=$(grep '^Peak heap B:' "$f" | awk '{print $NF}') || peak=""
+            mem_data["${bench}|${q}"]="${peak:-—}"
+          done
+
+          mem_qs=()
+          for key in "${!mem_data[@]}"; do mem_qs+=("${key##*|}"); done
+          mapfile -t mem_qs < <(printf '%s\n' "${mem_qs[@]}" | sort -un)
+
+          if [[ ${#mem_qs[@]} -gt 0 ]]; then
+            # ── Markdown memory table → GitHub Step Summary ──────────────
+            {
+              echo "## Python Benchmark Results (peak heap bytes)"
+              echo ""
+              echo "| Q | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
+              echo "|---|----------|------------|-----------|-------------|"
+              for q in "${mem_qs[@]}"; do
+                printf "| %s" "$q"
+                for b in "${benchmarks[@]}"; do
+                  printf " | %s" "${mem_data[${b}|${q}]:-—}"
+                done
+                echo " |"
+              done
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # ── Plain-text memory table → log ────────────────────────────
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "                  Peak heap bytes (massif)"
+            echo "───────────────────────────────────────────────────────────────"
+            printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+              "Q" "lex_tpch" "parse_tpch" "lex_tpcds" "parse_tpcds"
+            echo "───────────────────────────────────────────────────────────────"
+            for q in "${mem_qs[@]}"; do
+              printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+                "$q" \
+                "${mem_data[test_lex_tpch|${q}]:-—}" \
+                "${mem_data[test_parse_tpch|${q}]:-—}" \
+                "${mem_data[test_lex_tpcds|${q}]:-—}" \
+                "${mem_data[test_parse_tpcds|${q}]:-—}"
+            done
+            echo "═══════════════════════════════════════════════════════════════"
+          fi
 
           # ── Rust stats (raw) ──────────────────────────────────────────
           rust_files=(bench-stats/rust-*.txt)
