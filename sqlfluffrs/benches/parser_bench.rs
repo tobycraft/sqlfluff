@@ -38,14 +38,14 @@ fn tokens_complex_joins() -> Vec<Token> {
 }
 fn tokens_expression_recursion() -> Vec<Token> {
     let path = fixture_path("expression_recursion.sql");
-    let sql = fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Failed to read {}", path.display()));
+    let sql =
+        fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read {}", path.display()));
     lex_sql(&sql)
 }
 fn tokens_expression_recursion_2() -> Vec<Token> {
     let path = fixture_path("expression_recursion_2.sql");
-    let sql = fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Failed to read {}", path.display()));
+    let sql =
+        fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read {}", path.display()));
     lex_sql(&sql)
 }
 
@@ -59,11 +59,7 @@ fn tokens_expression_recursion_2() -> Vec<Token> {
 #[bench::expression_recursion(tokens_expression_recursion())]
 #[bench::expression_recursion_2(tokens_expression_recursion_2())]
 fn bench_parse(tokens: Vec<Token>) {
-    let mut parser = Parser::new(
-        black_box(&tokens),
-        Dialect::Ansi,
-        hashbrown::HashMap::new(),
-    );
+    let mut parser = Parser::new(black_box(&tokens), Dialect::Ansi, hashbrown::HashMap::new());
     black_box(parser.call_rule_as_root().expect("Parse failed"));
 }
 

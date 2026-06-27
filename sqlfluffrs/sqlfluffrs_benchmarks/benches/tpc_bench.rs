@@ -36,8 +36,7 @@ fn query_idx(env_var: &str, default: u32) -> u32 {
 }
 
 fn read_file(path: &Path) -> String {
-    fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
+    fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
 }
 
 fn lex_sql(sql: &str) -> Vec<Token> {
@@ -101,4 +100,9 @@ library_benchmark_group!(name = parse_tpch; benchmarks = bench_parse_tpch);
 library_benchmark_group!(name = lex_tpcds; benchmarks = bench_lex_tpcds);
 library_benchmark_group!(name = parse_tpcds; benchmarks = bench_parse_tpcds);
 
-main!(library_benchmark_groups = lex_tpch, parse_tpch, lex_tpcds, parse_tpcds);
+main!(
+    library_benchmark_groups = lex_tpch,
+    parse_tpch,
+    lex_tpcds,
+    parse_tpcds
+);
