@@ -189,7 +189,7 @@ jobs:
       - name: Run benchmark under Valgrind callgrind
         run: |
           mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc CODSPEED_ENV=runner \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
