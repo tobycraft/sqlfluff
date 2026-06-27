@@ -33,15 +33,25 @@
 #  test_parse_tpch            parse_tpch
 #  test_lex_tpcds             lex_tpcds
 #  test_parse_tpcds           parse_tpcds
+#          │                          │
+#          └──────────┬───────────────┘
+#                     ▼
+#              bench-summary
+#              (aggregates all stats)
 #
 # Python benchmarks run under stock Valgrind callgrind.  The --codspeed flag
 # is kept so that pytest-codspeed injects CALLGRIND_START/STOP_INSTRUMENTATION
 # around each benchmark body, scoping the instruction count to the hot path only
 # (--instr-atstart=no keeps startup overhead out of the measurement).
-# A summary of total instructions is printed at the end of each job.
 #
-# Rust benchmarks run via `cargo bench`; Criterion prints timing summaries
-# directly to the job log.
+# Rust benchmarks use iai-callgrind, which manages Valgrind internally and
+# produces per-function instruction counts with setup code excluded from
+# measurement.  The iai-callgrind-runner binary must be installed at a version
+# that exactly matches the iai-callgrind library in Cargo.toml; the install
+# step extracts the resolved version from `cargo metadata` automatically.
+#
+# A bench-summary job downloads all per-job stat artifacts and prints a
+# combined report at the end of the workflow.
 #
 name: Performance Benchmarks
 
@@ -188,23 +198,32 @@ jobs:
             --dump-line=no \
             python -m pytest test/benchmarks/ -k ${{ matrix.benchmark }} --codspeed -v
 
-      - name: Print instruction-count summary
+      - name: Save instruction-count summary
         if: always()
         run: |
-          echo "──────────────────────────────────────"
-          echo "Benchmark : ${{ matrix.benchmark }}"
-          awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-            /tmp/callgrind/callgrind.out
+          mkdir -p /tmp/bench-stats
+          {
+            echo "Benchmark: ${{ matrix.benchmark }}"
+            awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
+              /tmp/callgrind/callgrind.out
+          } | tee /tmp/bench-stats/python-${{ matrix.benchmark }}.txt
           echo "──────────────────────────────────────"
 
+      - name: Upload bench stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-python-${{ matrix.benchmark }}
+          path: /tmp/bench-stats/python-${{ matrix.benchmark }}.txt
+          if-no-files-found: warn
+
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust parser_bench — Valgrind callgrind.
+  # Rust parser_bench — iai-callgrind.
   #
-  # codspeed_criterion_compat detects CODSPEED_ENV=runner and runs each
-  # benchmark exactly once wrapped in CALLGRIND_START/STOP_INSTRUMENTATION,
-  # so --instr-atstart=no scopes the instruction count to the hot path only.
-  # We build the binary separately then invoke it under Valgrind directly —
-  # no cargo-codspeed or CodSpeed account required.
+  # iai-callgrind manages Valgrind internally: it builds the bench binary, then
+  # the iai-callgrind-runner invokes each benchmark function once under
+  # callgrind with --instr-atstart=no, so only the benchmark body is counted.
+  # The runner version must exactly match the iai-callgrind library version.
   # ─────────────────────────────────────────────────────────────────────────────
   rust-parser-bench:
     name: Rust – parser_bench
@@ -248,42 +267,33 @@ jobs:
       - name: Install Valgrind
         run: sudo apt-get update -q && sudo apt-get install -y valgrind
 
-      - name: Build parser_bench
-        working-directory: sqlfluffrs
-        run: cargo build --release --bench parser_bench
-
-      - name: Run parser_bench under Valgrind callgrind
+      - name: Install iai-callgrind-runner
         working-directory: sqlfluffrs
         run: |
-          mkdir -p /tmp/callgrind
-          BENCH_BIN=$(ls target/release/deps/parser_bench-* | grep -v '\.d$' | head -1)
-          CODSPEED_ENV=runner \
-          CODSPEED_CARGO_WORKSPACE_ROOT=${{ github.workspace }}/sqlfluffrs \
-          valgrind -q \
-            --tool=callgrind \
-            --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --instr-atstart=no \
-            --combine-dumps=yes \
-            --dump-line=no \
-            "$BENCH_BIN"
+          version=$(cargo metadata --format-version 1 \
+            | python3 -c "
+import sys, json
+m = json.load(sys.stdin)
+print(next(p['version'] for p in m['packages'] if p['name'] == 'iai-callgrind'))
+")
+          cargo install iai-callgrind-runner --version "$version"
 
-      - name: Print instruction-count summary
+      - name: Run parser_bench
+        working-directory: sqlfluffrs
+        run: |
+          mkdir -p /tmp/bench-stats
+          cargo bench --bench parser_bench 2>&1 | tee /tmp/bench-stats/rust-parser-bench.txt
+
+      - name: Upload bench stats
         if: always()
-        working-directory: sqlfluffrs
-        run: |
-          echo "──────────────────────────────────────"
-          echo "Benchmark : parser_bench"
-          awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-            /tmp/callgrind/callgrind.out
-          echo "──────────────────────────────────────"
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-rust-parser-bench
+          path: /tmp/bench-stats/rust-parser-bench.txt
+          if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust tpc_bench — one matrix job per benchmark, Valgrind callgrind.
-  #
-  # Same approach as rust-parser-bench: build the binary, run it under Valgrind
-  # with CODSPEED_ENV=runner so codspeed_criterion_compat executes exactly one
-  # instrumented iteration per benchmark function.  The filter argument after
-  # -- selects which benchmark function runs in this matrix slot.
+  # Rust tpc_bench — one matrix job per benchmark, iai-callgrind.
   #
   # The Rust source to compile comes from commit_sha.  build.rs is overlaid
   # from the workflow branch so that TPC_FIXTURES_DIR always resolves to
@@ -355,30 +365,59 @@ jobs:
       - name: Install Valgrind
         run: sudo apt-get update -q && sudo apt-get install -y valgrind
 
-      - name: Build tpc_bench
-        working-directory: sqlfluffrs
-        run: cargo build --release -p sqlfluffrs_benchmarks --bench tpc_bench
-
-      - name: Run ${{ matrix.benchmark }} under Valgrind callgrind
+      - name: Install iai-callgrind-runner
         working-directory: sqlfluffrs
         run: |
-          mkdir -p /tmp/callgrind
-          BENCH_BIN=$(ls target/release/deps/tpc_bench-* | grep -v '\.d$' | head -1)
-          CODSPEED_ENV=runner \
-          CODSPEED_CARGO_WORKSPACE_ROOT=${{ github.workspace }}/sqlfluffrs \
-          valgrind -q \
-            --tool=callgrind \
-            --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --instr-atstart=no \
-            --combine-dumps=yes \
-            --dump-line=no \
-            "$BENCH_BIN" ${{ matrix.benchmark }}
+          version=$(cargo metadata --format-version 1 \
+            | python3 -c "
+import sys, json
+m = json.load(sys.stdin)
+print(next(p['version'] for p in m['packages'] if p['name'] == 'iai-callgrind'))
+")
+          cargo install iai-callgrind-runner --version "$version"
 
-      - name: Print instruction-count summary
+      - name: Run ${{ matrix.benchmark }}
+        working-directory: sqlfluffrs
+        run: |
+          mkdir -p /tmp/bench-stats
+          cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench -- ${{ matrix.benchmark }} \
+            2>&1 | tee /tmp/bench-stats/rust-${{ matrix.benchmark }}.txt
+
+      - name: Upload bench stats
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-rust-tpc-${{ matrix.benchmark }}
+          path: /tmp/bench-stats/rust-${{ matrix.benchmark }}.txt
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Aggregate all per-job stat artifacts into a single summary.
+  # Runs even if individual bench jobs fail (if: always()).
+  # ─────────────────────────────────────────────────────────────────────────────
+  bench-summary:
+    name: Benchmark Summary
+    runs-on: ubuntu-latest
+    needs: [python-benchmarks, rust-parser-bench, rust-tpc-benchmarks]
+    if: always()
+
+    steps:
+      - name: Download all benchmark stats
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-stats-*
+          merge-multiple: true
+          path: bench-stats/
+
+      - name: Print summary
         run: |
-          echo "──────────────────────────────────────"
-          echo "Benchmark : ${{ matrix.benchmark }}"
-          awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-            /tmp/callgrind/callgrind.out
-          echo "──────────────────────────────────────"
+          echo "════════════════════════════════════════════════"
+          echo "              Benchmark Summary"
+          echo "════════════════════════════════════════════════"
+          for f in $(ls bench-stats/*.txt 2>/dev/null | sort); do
+            echo ""
+            echo "── $(basename "$f" .txt) ──────────────────────"
+            cat "$f"
+          done
+          echo ""
+          echo "════════════════════════════════════════════════"

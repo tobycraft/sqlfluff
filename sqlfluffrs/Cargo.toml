@@ -69,7 +69,7 @@ sqlfluffrs_python = { path = "sqlfluffrs_python", optional = true }
 
 [dev-dependencies]
 env_logger = "0.11.9"
-codspeed-criterion-compat = "2"
+iai-callgrind = "0.14"
 flamegraph = "0.6.11"
 
 [[bench]]
