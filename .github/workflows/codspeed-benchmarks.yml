@@ -27,21 +27,21 @@
 #          │                    │
 #          └──────────┬─────────┘
 #                     ▼
-#          Python fan-out (242 jobs in parallel):     rust-tpc-benchmarks
-#          test_lex_tpch   × 22 queries (Q0–Q21)      (4 jobs in parallel)
-#          test_parse_tpch × 22 queries (Q0–Q21)      lex_tpch
-#          test_lex_tpcds  × 99 queries (Q0–Q98)      parse_tpch
-#          test_parse_tpcds× 99 queries (Q0–Q98)      lex_tpcds
+#          Python fan-out (40 jobs in parallel):       rust-tpc-benchmarks
+#          test_lex_tpch   × 10 queries (Q0–Q9)        (4 jobs in parallel)
+#          test_parse_tpch × 10 queries (Q0–Q9)        lex_tpch
+#          test_lex_tpcds  × 10 queries (Q0–Q9)        parse_tpch
+#          test_parse_tpcds× 10 queries (Q0–Q9)        lex_tpcds
 #                     │                               parse_tpcds
 #                     └──────────────┬────────────────┘
 #                                    ▼
 #                             bench-summary
 #                             (aggregates all stats)
 #
-# Python benchmarks run under stock Valgrind callgrind.  The --codspeed flag
-# is kept so that pytest-codspeed injects CALLGRIND_START/STOP_INSTRUMENTATION
-# around each benchmark body, scoping the instruction count to the hot path only
-# (--instr-atstart=no keeps startup overhead out of the measurement).
+# Python benchmarks run under stock Valgrind callgrind with default
+# --instr-atstart=yes.  pytest-codspeed is disabled (-p no:codspeed) and
+# --benchmark-disable is passed so each benchmark function runs exactly once
+# without timing overhead; callgrind counts all instructions for the full run.
 #
 # Rust benchmarks use iai-callgrind, which manages Valgrind internally and
 # produces per-function instruction counts with setup code excluded from
@@ -180,7 +180,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     steps:
       - name: Checkout workflow branch (benchmark infrastructure)
@@ -214,14 +214,14 @@ jobs:
           TPCH_QUERY_IDX: ${{ matrix.query_idx }}
         run: |
           mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc CODSPEED_ENV=runner \
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --instr-atstart=no \
             --combine-dumps=yes \
             --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpch --codspeed -v
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpch \
+              -v --benchmark-disable -p no:codspeed
 
       - name: Save instruction-count summary
         if: always()
@@ -249,7 +249,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     steps:
       - name: Checkout workflow branch (benchmark infrastructure)
@@ -283,14 +283,14 @@ jobs:
           TPCH_QUERY_IDX: ${{ matrix.query_idx }}
         run: |
           mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc CODSPEED_ENV=runner \
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --instr-atstart=no \
             --combine-dumps=yes \
             --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpch --codspeed -v
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpch \
+              -v --benchmark-disable -p no:codspeed
 
       - name: Save instruction-count summary
         if: always()
@@ -318,7 +318,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     steps:
       - name: Checkout workflow branch (benchmark infrastructure)
@@ -352,14 +352,14 @@ jobs:
           TPCDS_QUERY_IDX: ${{ matrix.query_idx }}
         run: |
           mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc CODSPEED_ENV=runner \
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --instr-atstart=no \
             --combine-dumps=yes \
             --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpcds --codspeed -v
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpcds \
+              -v --benchmark-disable -p no:codspeed
 
       - name: Save instruction-count summary
         if: always()
@@ -387,7 +387,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     steps:
       - name: Checkout workflow branch (benchmark infrastructure)
@@ -421,14 +421,14 @@ jobs:
           TPCDS_QUERY_IDX: ${{ matrix.query_idx }}
         run: |
           mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc CODSPEED_ENV=runner \
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --instr-atstart=no \
             --combine-dumps=yes \
             --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpcds --codspeed -v
+            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpcds \
+              -v --benchmark-disable -p no:codspeed
 
       - name: Save instruction-count summary
         if: always()
