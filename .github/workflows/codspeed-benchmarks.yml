@@ -189,7 +189,7 @@ jobs:
       - name: Run benchmark under Valgrind callgrind
         run: |
           mkdir -p /tmp/callgrind
-          set +e
+          rc=0
           PYTHONHASHSEED=0 PYTHONMALLOC=malloc CODSPEED_ENV=runner \
           valgrind -q \
             --tool=callgrind \
@@ -197,8 +197,7 @@ jobs:
             --instr-atstart=no \
             --combine-dumps=yes \
             --dump-line=no \
-            python -m pytest test/benchmarks/ -k ${{ matrix.benchmark }} --codspeed -v
-          rc=$?
+            python -m pytest test/benchmarks/ -k ${{ matrix.benchmark }} --codspeed -v || rc=$?
           # Exit 139 (128 + SIGSEGV) is a known valgrind/libgcc incompatibility
           # triggered by Python's pthread_exit path during process teardown.
           # The test output above is the correctness signal; all other non-zero
