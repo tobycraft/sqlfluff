@@ -635,13 +635,68 @@ jobs:
 
       - name: Print summary
         run: |
-          echo "════════════════════════════════════════════════"
-          echo "              Benchmark Summary"
-          echo "════════════════════════════════════════════════"
-          for f in $(ls bench-stats/*.txt 2>/dev/null | sort -V); do
-            echo ""
-            echo "── $(basename "$f" .txt) ──────────────────────"
-            cat "$f"
+          shopt -s nullglob
+          benchmarks=(test_lex_tpch test_parse_tpch test_lex_tpcds test_parse_tpcds)
+
+          # Parse Python stat files into associative array keyed by "bench|query"
+          declare -A data
+          for f in bench-stats/python-test_*-q*.txt; do
+            base=$(basename "$f" .txt)          # python-test_lex_tpch-q0
+            bench="${base#python-}"              # test_lex_tpch-q0
+            q="${bench##*-q}"                    # 0
+            bench="${bench%-q*}"                 # test_lex_tpch
+            instr=$(grep '^Instructions:' "$f" | awk '{print $2}') || instr=""
+            data["${bench}|${q}"]="${instr:-—}"
           done
-          echo ""
-          echo "════════════════════════════════════════════════"
+
+          # Determine query range from keys present in data
+          qs=()
+          for key in "${!data[@]}"; do qs+=("${key##*|}"); done
+          mapfile -t qs < <(printf '%s\n' "${qs[@]}" | sort -un)
+
+          # ── Markdown table → GitHub Step Summary ──────────────────────
+          {
+            echo "## Python Benchmark Results (instructions)"
+            echo ""
+            echo "| Q | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
+            echo "|---|----------|------------|-----------|-------------|"
+            for q in "${qs[@]}"; do
+              printf "| %s" "$q"
+              for b in "${benchmarks[@]}"; do
+                printf " | %s" "${data[${b}|${q}]:-—}"
+              done
+              echo " |"
+            done
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Plain-text table → log ─────────────────────────────────────
+          W=13
+          echo "═══════════════════════════════════════════════════════════════"
+          printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+            "Q" "lex_tpch" "parse_tpch" "lex_tpcds" "parse_tpcds"
+          echo "───────────────────────────────────────────────────────────────"
+          for q in "${qs[@]}"; do
+            printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+              "$q" \
+              "${data[test_lex_tpch|${q}]:-—}" \
+              "${data[test_parse_tpch|${q}]:-—}" \
+              "${data[test_lex_tpcds|${q}]:-—}" \
+              "${data[test_parse_tpcds|${q}]:-—}"
+          done
+          echo "═══════════════════════════════════════════════════════════════"
+
+          # ── Rust stats (raw) ──────────────────────────────────────────
+          rust_files=(bench-stats/rust-*.txt)
+          if [[ ${#rust_files[@]} -gt 0 ]]; then
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "                      Rust Benchmarks"
+            echo "═══════════════════════════════════════════════════════════════"
+            for f in "${rust_files[@]}"; do
+              echo ""
+              echo "── $(basename "$f" .txt) ──"
+              cat "$f"
+            done
+            echo "═══════════════════════════════════════════════════════════════"
+          fi
