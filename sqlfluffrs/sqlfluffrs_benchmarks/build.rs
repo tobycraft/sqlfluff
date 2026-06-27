@@ -104,12 +104,25 @@ fn fetch_fixtures(fixtures_dir: &Path) -> Result<(), String> {
 }
 
 fn download(url: &str) -> Result<String, String> {
-    ureq::get(url)
-        .call()
-        .map_err(|e| format!("GET {url}: {e}"))?
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("reading {url}: {e}"))
+    let mut last_err = String::new();
+    for attempt in 0u32..5 {
+        if attempt > 0 {
+            let secs = 2u64.pow(attempt - 1); // 1s, 2s, 4s, 8s
+            println!("cargo:warning=Retrying ({attempt}/4) after {secs}s: {url}");
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+        }
+        match ureq::get(url)
+            .header("User-Agent", "sqlfluff-benchmarks/1.0")
+            .call()
+        {
+            Ok(mut resp) => match resp.body_mut().read_to_string() {
+                Ok(body) => return Ok(body),
+                Err(e) => last_err = format!("reading body of {url}: {e}"),
+            },
+            Err(e) => last_err = format!("GET {url}: {e}"),
+        }
+    }
+    Err(last_err)
 }
 
 /// Normalize to Unix line endings, strip per-line trailing whitespace, and end
