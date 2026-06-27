@@ -815,17 +815,15 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Rust tpc_bench — one matrix job per benchmark, iai-callgrind.
   #
-  # The Rust source to compile comes from commit_sha.  build.rs is overlaid
-  # from the workflow branch so that TPC_FIXTURES_DIR always resolves to
-  # .cache/tpc-fixtures/ regardless of what the old commit's build.rs did.
-  # If sqlfluffrs_benchmarks or tpc_bench did not exist in the target commit,
-  # continue-on-error lets the remaining matrix jobs still report results.
+  # The Rust source to compile comes from commit_sha.  The entire
+  # sqlfluffrs_benchmarks crate and workspace Cargo.toml are overlaid from the
+  # workflow branch so that benchmark infrastructure is always current regardless
+  # of the target commit age.
   # ─────────────────────────────────────────────────────────────────────────────
   rust-tpc-benchmarks:
     name: Rust – ${{ matrix.benchmark }}
     runs-on: ubuntu-latest
     needs: fetch-tpc-fixtures
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -842,11 +840,12 @@ jobs:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 1
 
-      - name: Overlay current build.rs for fixture path compatibility
+      - name: Overlay benchmark infrastructure from workflow branch
         run: |
           git fetch origin ${{ github.ref_name }} --depth=1
-          git checkout FETCH_HEAD -- sqlfluffrs/sqlfluffrs_benchmarks/build.rs
-        continue-on-error: true
+          git checkout FETCH_HEAD -- \
+            sqlfluffrs/Cargo.toml \
+            sqlfluffrs/sqlfluffrs_benchmarks/
 
       - name: Download TPC fixtures
         uses: actions/download-artifact@v4
