@@ -1,9 +1,8 @@
-######################################
-## CodSpeed Performance Benchmarks  ##
-######################################
+################################
+## Performance Benchmarks      ##
+################################
 #
-# Manually triggered workflow that benchmarks a specific commit against the
-# benchmark infrastructure on this branch.
+# Manually triggered workflow that benchmarks a specific commit.
 #
 # Key design principle
 # ─────────────────────
@@ -16,13 +15,10 @@
 #     → taken from commit_sha.
 #
 # This means the benchmarks can be run against any old commit, even ones that
-# pre-date the test files, pytest-codspeed, or the shared .cache fixture path.
+# pre-date the test files or the shared .cache fixture path.
 #
-# Usage (GitHub UI → Actions → CodSpeed Performance Benchmarks → Run workflow):
+# Usage (GitHub UI → Actions → Performance Benchmarks → Run workflow):
 #   commit_sha: the full or abbreviated SHA to benchmark, e.g. "abc1234"
-#
-# Secrets required:
-#   CODSPEED_TOKEN – repository/organisation CodSpeed API token
 #
 # Job graph:
 #
@@ -38,11 +34,16 @@
 #  test_lex_tpcds             lex_tpcds
 #  test_parse_tpcds           parse_tpcds
 #
-# Each benchmark is its own job so its Valgrind callgraph is processed in
-# isolation.  Running all four TPC tests in one job accumulates ~80 min of
-# callgrind data, which overflows the CodSpeed runner and causes exit 139.
+# Python benchmarks run under stock Valgrind callgrind.  The --codspeed flag
+# is kept so that pytest-codspeed injects CALLGRIND_START/STOP_INSTRUMENTATION
+# around each benchmark body, scoping the instruction count to the hot path only
+# (--instr-atstart=no keeps startup overhead out of the measurement).
+# A summary of total instructions is printed at the end of each job.
 #
-name: CodSpeed Performance Benchmarks
+# Rust benchmarks run via `cargo bench`; Criterion prints timing summaries
+# directly to the job log.
+#
+name: Performance Benchmarks
 
 on:
   workflow_dispatch:
@@ -52,10 +53,8 @@ on:
         required: true
         type: string
 
-# One run per SHA at a time; never cancel an in-progress benchmark because
-# partial results confuse CodSpeed's baseline comparison.
 concurrency:
-  group: codspeed-${{ inputs.commit_sha }}
+  group: benchmarks-${{ inputs.commit_sha }}
   cancel-in-progress: false
 
 jobs:
@@ -73,8 +72,6 @@ jobs:
     steps:
       - name: Checkout workflow branch
         uses: actions/checkout@v6
-        # No ref: defaults to the branch HEAD that triggered this workflow,
-        # i.e. the benchmark infrastructure branch — not the target SHA.
         with:
           fetch-depth: 1
 
@@ -142,7 +139,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
-        # No ref: gives us test/benchmarks/ and conftest.py from this branch.
 
       - name: Checkout target commit (library under test)
         uses: actions/checkout@v6
@@ -172,17 +168,34 @@ jobs:
             constraints/*.txt
 
       - name: Install sqlfluff from target commit
-        # Install the old library; current test files will import it.
         run: uv pip install --system ./target-sqlfluff
 
       - name: Install benchmark dependencies
         run: uv pip install --system pytest pytest-codspeed pytest-benchmark
 
-      - name: Benchmark via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/benchmarks/ -k ${{ matrix.benchmark }} --codspeed -v
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Run benchmark under Valgrind callgrind
+        run: |
+          mkdir -p /tmp/callgrind
+          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+          valgrind -q \
+            --tool=callgrind \
+            --callgrind-out-file=/tmp/callgrind/callgrind.out \
+            --instr-atstart=no \
+            --combine-dumps=yes \
+            --dump-line=no \
+            python -m pytest test/benchmarks/ -k ${{ matrix.benchmark }} --codspeed -v
+
+      - name: Print instruction-count summary
+        if: always()
+        run: |
+          echo "──────────────────────────────────────"
+          echo "Benchmark : ${{ matrix.benchmark }}"
+          awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
+            /tmp/callgrind/callgrind.out
+          echo "──────────────────────────────────────"
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Rust parser_bench.
@@ -194,7 +207,6 @@ jobs:
   rust-parser-bench:
     name: Rust – parser_bench
     runs-on: ubuntu-latest
-    # No needs: parser_bench uses committed fixtures, not TPC downloads.
 
     steps:
       - name: Checkout target commit (Rust source under test)
@@ -231,15 +243,9 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed
-
-      - name: Benchmark parser_bench via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          run: cargo codspeed build --bench parser_bench && cargo codspeed run --bench parser_bench
+      - name: Run parser_bench
+        working-directory: sqlfluffrs
+        run: cargo bench --bench parser_bench
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Rust tpc_bench — one matrix job per benchmark.
@@ -249,9 +255,6 @@ jobs:
   # .cache/tpc-fixtures/ regardless of what the old commit's build.rs did.
   # If sqlfluffrs_benchmarks or tpc_bench did not exist in the target commit,
   # continue-on-error lets the remaining matrix jobs still report results.
-  #
-  # The filter after -- is passed to the criterion binary so only the named
-  # benchmark function runs under Valgrind.
   # ─────────────────────────────────────────────────────────────────────────────
   rust-tpc-benchmarks:
     name: Rust – ${{ matrix.benchmark }}
@@ -275,14 +278,9 @@ jobs:
           fetch-depth: 1
 
       - name: Overlay current build.rs for fixture path compatibility
-        # Ensures TPC_FIXTURES_DIR is baked in as .cache/tpc-fixtures/ even
-        # when the target commit pre-dates the shared cache path in build.rs.
         run: |
           git fetch origin ${{ github.ref_name }} --depth=1
           git checkout FETCH_HEAD -- sqlfluffrs/sqlfluffrs_benchmarks/build.rs
-        # If sqlfluffrs_benchmarks doesn't exist in the target commit,
-        # the checkout above will fail; tpc_bench will also fail below.
-        # Both are allowed to fail — parser_bench is the stable target.
         continue-on-error: true
 
       - name: Download TPC fixtures
@@ -319,13 +317,6 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed
-
-      - name: Benchmark via CodSpeed
-        uses: CodSpeedHQ/action@v3
-        with:
-          token: ${{ secrets.CODSPEED_TOKEN }}
-          working-directory: sqlfluffrs
-          # No --features fetch: fixtures are already in .cache/tpc-fixtures/
-          run: cargo codspeed build -p sqlfluffrs_benchmarks --bench tpc_bench && cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- ${{ matrix.benchmark }}
+      - name: Run ${{ matrix.benchmark }}
+        working-directory: sqlfluffrs
+        run: cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench -- ${{ matrix.benchmark }}
