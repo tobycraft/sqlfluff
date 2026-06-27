@@ -85,10 +85,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.14
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -163,10 +163,10 @@ jobs:
           name: tpc-fixtures
           path: .cache/tpc-fixtures/
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.14
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -243,10 +243,10 @@ jobs:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 1
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.14
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -337,10 +337,10 @@ jobs:
           name: tpc-fixtures
           path: .cache/tpc-fixtures/
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.14
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
