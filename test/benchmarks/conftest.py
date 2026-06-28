@@ -33,12 +33,16 @@ def _load_tpcds() -> list[str]:
 @pytest.fixture(scope="session")
 def tpch_sqls() -> list[str]:
     """All 22 TPC-H query strings, pre-fetched into .cache/tpc-fixtures/."""
+    if not (_CACHE_DIR / "tpc-h").exists():
+        pytest.skip("TPC-H fixtures not found; run fetch-tpc-fixtures first")
     return _load_tpch()
 
 
 @pytest.fixture(scope="session")
 def tpcds_sqls() -> list[str]:
     """All 99 TPC-DS query strings, pre-fetched into .cache/tpc-fixtures/."""
+    if not (_CACHE_DIR / "tpc-ds").exists():
+        pytest.skip("TPC-DS fixtures not found; run fetch-tpc-fixtures first")
     return _load_tpcds()
 
 
