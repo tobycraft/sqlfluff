@@ -583,17 +583,64 @@ jobs:
             echo "═══════════════════════════════════════════════════════════════"
           fi
 
-          # ── Rust stats (raw) ──────────────────────────────────────────
-          rust_files=(bench-stats/rust-*.txt)
-          if [[ ${#rust_files[@]} -gt 0 ]]; then
+          # ── Parse Rust TPC stat files ─────────────────────────────
+          rust_benchmarks=(lex_tpch parse_tpch lex_tpcds parse_tpcds)
+          declare -A rust_data
+
+          parse_iai_metric() {
+            grep -m1 "$1" "$2" 2>/dev/null \
+              | grep -oE '[0-9][0-9,]*' | head -1 | tr -d ',' || true
+          }
+
+          any_rust=false
+          for bench in "${rust_benchmarks[@]}"; do
+            f="bench-stats/rust-${bench}.txt"
+            if [[ -f "$f" ]]; then
+              any_rust=true
+              rust_data["${bench}|instr"]=$(parse_iai_metric "Instructions:"    "$f")
+              rust_data["${bench}|l1"]=$(   parse_iai_metric "L1 Hits:"         "$f")
+              rust_data["${bench}|l2"]=$(   parse_iai_metric "L2 Hits:"         "$f")
+              rust_data["${bench}|ram"]=$(  parse_iai_metric "RAM Hits:"        "$f")
+              rust_data["${bench}|cycles"]=$(parse_iai_metric "Estimated Cycles:" "$f")
+            fi
+          done
+
+          if $any_rust; then
+            rust_metric_labels=("Instructions" "L1 Hits" "L2 Hits" "RAM Hits" "Est. Cycles")
+            rust_metric_keys=(instr l1 l2 ram cycles)
+
+            # ── Markdown Rust table → GitHub Step Summary ────────────
+            {
+              echo "## Rust TPC Benchmark Results (iai-callgrind)"
+              echo ""
+              echo "| Metric | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
+              echo "|--------|----------|------------|-----------|-------------|"
+              for i in "${!rust_metric_labels[@]}"; do
+                printf "| %s" "${rust_metric_labels[$i]}"
+                for bench in "${rust_benchmarks[@]}"; do
+                  printf " | %s" "${rust_data[${bench}|${rust_metric_keys[$i]}]:-—}"
+                done
+                echo " |"
+              done
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # ── Plain-text Rust table → log ──────────────────────────
+            MW=16
             echo ""
             echo "═══════════════════════════════════════════════════════════════"
-            echo "                      Rust Benchmarks"
-            echo "═══════════════════════════════════════════════════════════════"
-            for f in "${rust_files[@]}"; do
-              echo ""
-              echo "── $(basename "$f" .txt) ──"
-              cat "$f"
+            echo "             Rust TPC Benchmarks (iai-callgrind)"
+            echo "───────────────────────────────────────────────────────────────"
+            printf "%-${MW}s %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+              "Metric" "lex_tpch" "parse_tpch" "lex_tpcds" "parse_tpcds"
+            echo "───────────────────────────────────────────────────────────────"
+            for i in "${!rust_metric_labels[@]}"; do
+              printf "%-${MW}s %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+                "${rust_metric_labels[$i]}" \
+                "${rust_data[lex_tpch|${rust_metric_keys[$i]}]:-—}"   \
+                "${rust_data[parse_tpch|${rust_metric_keys[$i]}]:-—}" \
+                "${rust_data[lex_tpcds|${rust_metric_keys[$i]}]:-—}"  \
+                "${rust_data[parse_tpcds|${rust_metric_keys[$i]}]:-—}"
             done
             echo "═══════════════════════════════════════════════════════════════"
           fi
