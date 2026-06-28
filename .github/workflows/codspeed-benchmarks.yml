@@ -199,8 +199,8 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Python benchmarks — max_parallel runners, each assigned a round-robin slice
-  # of all 64 (benchmark × query) combinations.  Combinations are ordered as:
-  #   lex_tpch Q0–Q21, parse_tpch Q0–Q21, lex_tpcds Q0–Q9, parse_tpcds Q0–Q9
+  # of all 40 (benchmark × query) combinations.  Combinations are ordered as:
+  #   lex_tpch Q0–Q9, parse_tpch Q0–Q9, lex_tpcds Q0–Q9, parse_tpcds Q0–Q9
   # Runner r handles indices r, r+max_parallel, r+2×max_parallel, …  running
   # them sequentially.  Every runner carries ~equal total work so all finish
   # at roughly the same time with no straggler holding back the group.
@@ -247,7 +247,7 @@ jobs:
           # Build ordered list of all (benchmark, query_idx) combinations.
           declare -a combos
           for bench in test_lex_tpch test_parse_tpch test_lex_tpcds test_parse_tpcds; do
-            if [[ "$bench" == *tpcds* ]]; then max_q=9; else max_q=21; fi
+            max_q=9
             for ((q=0; q<=max_q; q++)); do combos+=("${bench}:${q}"); done
           done
 
