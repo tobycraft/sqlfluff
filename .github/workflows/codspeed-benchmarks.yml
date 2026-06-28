@@ -502,6 +502,8 @@ jobs:
           {
             echo "## Python Benchmark Results (instructions)"
             echo ""
+            echo "Counts the total CPU instructions executed per benchmark run under Valgrind callgrind. Deterministic and noise-free: unaffected by CPU speed or system load, so differences across commits reflect code-path changes, not environment variance."
+            echo ""
             echo "| Q | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
             echo "|---|----------|------------|-----------|-------------|"
             for q in "${qs[@]}"; do
@@ -551,6 +553,8 @@ jobs:
             # ── Markdown memory table → GitHub Step Summary ──────────────
             {
               echo "## Python Benchmark Results (peak heap bytes)"
+              echo ""
+              echo "Peak heap allocation observed during the run, collected with Valgrind massif. Use this to track whether a change grows or shrinks the high-water mark of live heap memory while lexing or parsing a query."
               echo ""
               echo "| Q | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
               echo "|---|----------|------------|-----------|-------------|"
@@ -612,6 +616,10 @@ jobs:
             # ── Markdown Rust table → GitHub Step Summary ────────────
             {
               echo "## Rust TPC Benchmark Results (iai-callgrind)"
+              echo ""
+              echo "Instruction count and cache breakdown for the Rust implementation, measured by iai-callgrind. Setup code (file I/O, tokenisation) runs outside Valgrind instrumentation, so only the benchmark body itself is counted."
+              echo ""
+              echo "> **Note:** Python instruction counts include interpreter startup, pytest overhead, and fixture loading — not just the benchmark body. Rust counts only the function under test. The two figures are not directly comparable; each is internally consistent for regression tracking within its own language."
               echo ""
               echo "| Metric | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
               echo "|--------|----------|------------|-----------|-------------|"
