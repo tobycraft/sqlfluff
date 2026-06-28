@@ -32,12 +32,12 @@
 #              │                                                 │
 #              ▼                                                 │
 #          python-bench (max_parallel runners,      rust-tpc-benchmarks
-#          each running a round-robin slice          (4 jobs in parallel)
-#          of all (4×max_queries) combinations):     lex_tpch
-#            runner 0: combos 0, 20, 40, …           parse_tpch
-#            runner 1: combos 1, 21, 41, …           lex_tpcds
-#            …                                       parse_tpcds
-#            runner N-1: combos N-1, 2N-1, …
+#          each running a round-robin slice          (single job, all 4
+#          of all (4×max_queries) combinations):     groups in one run:
+#            runner 0: combos 0, 20, 40, …           lex_tpch
+#            runner 1: combos 1, 21, 41, …           parse_tpch
+#            …                                       lex_tpcds
+#            runner N-1: combos N-1, 2N-1, …         parse_tpcds)
 #                     │                               │
 #                     └──────────────┬────────────────┘
 #                                    ▼
@@ -323,7 +323,14 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust tpc_bench — one matrix job per benchmark, iai-callgrind.
+  # Rust tpc_bench — all four benchmark groups in a single job, iai-callgrind.
+  #
+  # Each group benchmarks one query (controlled by TPCH_QUERY_IDX /
+  # TPCDS_QUERY_IDX env vars; defaults to Q13 for TPC-H and Q1 for TPC-DS).
+  # Running without a filter avoids iai-callgrind filter-matching surprises:
+  # group IDs have the form group::function::bench_id and a bare group-name
+  # substring may not match in all versions.  The combined output is split into
+  # per-group files (rust-{bench}.txt) so bench-summary can parse each column.
   #
   # The Rust source to compile comes from commit_sha.  The entire
   # sqlfluffrs_benchmarks crate and workspace Cargo.toml are overlaid from the
@@ -331,17 +338,9 @@ jobs:
   # of the target commit age.
   # ─────────────────────────────────────────────────────────────────────────────
   rust-tpc-benchmarks:
-    name: Rust – ${{ matrix.benchmark }}
+    name: Rust – TPC benchmarks (iai-callgrind)
     runs-on: ubuntu-latest
     needs: fetch-tpc-fixtures
-    strategy:
-      fail-fast: false
-      matrix:
-        benchmark:
-          - lex_tpch
-          - parse_tpch
-          - lex_tpcds
-          - parse_tpcds
 
     steps:
       - name: Checkout target commit (Rust source under test)
@@ -408,20 +407,44 @@ jobs:
         working-directory: sqlfluffrs
         run: cargo install iai-callgrind-runner --version "${{ steps.iai.outputs.version }}"
 
-      - name: Run ${{ matrix.benchmark }}
+      - name: Verify iai-callgrind-runner is available
+        if: steps.iai.outputs.version != ''
+        run: |
+          which iai-callgrind-runner && iai-callgrind-runner --version \
+            || echo "::warning::iai-callgrind-runner not found in PATH"
+
+      - name: Run TPC benchmarks (all groups)
         if: steps.iai.outputs.version != ''
         working-directory: sqlfluffrs
         run: |
           mkdir -p /tmp/bench-stats
-          cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench -- ${{ matrix.benchmark }} \
-            2>&1 | tee /tmp/bench-stats/rust-${{ matrix.benchmark }}.txt
+          cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench \
+            2>&1 | tee /tmp/bench-stats/rust-tpc-all.txt
+          # Split combined output into per-group files for bench-summary
+          python3 << 'PYEOF'
+          import re, pathlib
+          src = pathlib.Path('/tmp/bench-stats/rust-tpc-all.txt').read_text()
+          out = pathlib.Path('/tmp/bench-stats')
+          groups = ['lex_tpch', 'parse_tpch', 'lex_tpcds', 'parse_tpcds']
+          pat = re.compile(
+              r'^(bench_(?:' + '|'.join(groups) + r'))\b',
+              re.MULTILINE,
+          )
+          bs = [(m.start(), m.group(1)[len('bench_'):]) for m in pat.finditer(src)]
+          for i, (start, group) in enumerate(bs):
+              end = bs[i + 1][0] if i + 1 < len(bs) else len(src)
+              (out / f'rust-{group}.txt').write_text(src[start:end])
+              print(f'rust-{group}.txt: {end - start} bytes')
+          if not bs:
+              print('::warning::No iai-callgrind group sections found in output')
+          PYEOF
 
       - name: Upload bench stats
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bench-stats-rust-tpc-${{ matrix.benchmark }}
-          path: /tmp/bench-stats/rust-${{ matrix.benchmark }}.txt
+          name: bench-stats-rust-tpc
+          path: /tmp/bench-stats/rust-*.txt
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
