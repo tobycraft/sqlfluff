@@ -70,8 +70,8 @@ on:
       max_parallel:
         description: 'Maximum number of Python benchmark jobs to run concurrently (Rust jobs add ~5 more)'
         required: false
-        type: number
-        default: 19
+        type: string
+        default: '19'
 
 concurrency:
   group: benchmarks-${{ inputs.commit_sha }}
