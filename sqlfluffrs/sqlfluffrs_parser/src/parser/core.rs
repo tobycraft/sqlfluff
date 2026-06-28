@@ -552,7 +552,7 @@ impl<'a> Parser<'a> {
 
                 #[cfg(feature = "verbose-debug")]
                 {
-                    let raw = tok.raw().to_string();
+                    let raw = tok.raw().to_owned();
 
                     vdebug!(
                         "StringParser[table] MATCHED: token='{}' as {} (type={}) at pos={}",
@@ -647,7 +647,7 @@ impl<'a> Parser<'a> {
                 let token_pos = self.pos;
                 #[cfg(feature = "verbose-debug")]
                 {
-                    let raw = tok.raw().to_string();
+                    let raw = tok.raw().to_owned();
                     let token_type_val = tok.token_type.clone();
                     let inst_types = tok.instance_types.clone();
                     let class_types = tok.class_types();
@@ -896,7 +896,7 @@ impl<'a> Parser<'a> {
                 let token_pos = self.pos;
                 #[cfg(feature = "verbose-debug")]
                 {
-                    let raw = tok.raw().to_string();
+                    let raw = tok.raw().to_owned();
 
                     vdebug!(
                         "MultiStringParser[table] MATCHED: token='{}' as {} (type={}) at pos={}",
@@ -1363,7 +1363,7 @@ impl<'a> Parser<'a> {
             Some(tok) if tok.is_type(&[&token_type]) => {
                 let token_pos = self.pos;
                 #[cfg(feature = "verbose-debug")]
-                let raw = tok.raw().to_string();
+                let raw = tok.raw().to_owned();
                 self.bump();
 
                 vdebug!(
@@ -1546,12 +1546,12 @@ impl<'a> Parser<'a> {
             }
 
             if let Some(tok) = self.peek() {
-                let tok_raw = tok.raw();
+                let tok_raw = tok.raw().to_owned();
 
                 // Handle bracket openers - match entire bracketed section with nested brackets
                 if tok_raw == "(" || tok_raw == "[" || tok_raw == "{" {
                     let bracket_match =
-                        self.match_bracket_recursively(tok_raw.as_str(), tok_raw == "(");
+                        self.match_bracket_recursively(tok_raw.as_str(), tok_raw == "(", true);
                     child_matches.push(bracket_match);
                 } else {
                     // Regular token - just bump, it'll be part of the raw content
@@ -1603,10 +1603,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Recursively match brackets, handling nested brackets properly.
-    /// This ensures that nested brackets inside Anything grammars produce
-    /// proper BracketedSegment child_matches.
-    fn match_bracket_recursively(&mut self, open_bracket: &str, persists: bool) -> MatchResult {
+    /// Recursively match brackets. `nested_match` mirrors Python's
+    /// `resolve_bracket`: when true, directly-nested brackets are attached as
+    /// structured children; the recursive call passes false, so deeper brackets
+    /// are consumed but flattened to raw siblings (pure-Python parity).
+    fn match_bracket_recursively(
+        &mut self,
+        open_bracket: &str,
+        persists: bool,
+        nested_match: bool,
+    ) -> MatchResult {
         // Python parity: bracket leaf type depends on the bracket char
         // (`[`→square, `{`→curly); only `(` uses the plain bracket type.
         let (close_bracket, start_bracket_type, end_bracket_type) = match open_bracket {
@@ -1639,7 +1645,7 @@ impl<'a> Parser<'a> {
         // Match everything until matching close bracket, recursively handling nested brackets
         while !self.is_at_end() {
             if let Some(inner_tok) = self.peek() {
-                let inner_raw = inner_tok.raw();
+                let inner_raw = inner_tok.raw().to_owned();
 
                 if inner_raw == close_bracket {
                     // Found our closing bracket
@@ -1647,9 +1653,12 @@ impl<'a> Parser<'a> {
                 } else if inner_raw == "(" || inner_raw == "[" || inner_raw == "{" {
                     // Found a nested bracket - recursively match it
                     let nested_persists = inner_raw == "(";
-                    let nested_match =
-                        self.match_bracket_recursively(inner_raw.as_str(), nested_persists);
-                    inner_child_matches.push(Arc::new(nested_match));
+                    let nested_bracket =
+                        self.match_bracket_recursively(inner_raw.as_str(), nested_persists, false);
+                    // Only attach directly-nested brackets; deeper ones flatten.
+                    if nested_match {
+                        inner_child_matches.push(Arc::new(nested_bracket));
+                    }
                 } else {
                     // Regular token - just bump
                     self.bump();
