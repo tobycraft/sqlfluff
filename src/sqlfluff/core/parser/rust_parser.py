@@ -77,12 +77,27 @@ def get_parse_profile() -> dict[str, float]:
     reset_parse_profile() rather than just the final one. Only populated when
     profiling is enabled (see set_profiling / the SQLFLUFF_RS_PROFILE env var).
     Keys, in execution order:
+        config_copy    - FluffConfig.copy() in Linter.parse_string
+        render_string  - lexing + templating in Linter.render_string
         rust_core      - the Rust parse (parse_match_result_from_tokens)
         convert        - Python rebuild of the tree as a MatchResult
         apply          - building the BaseSegment tree (MatchResult.apply)
         apply_as_tree  - building the Rust arena tree (_rs_tree)
     """
     return dict(_PARSE_PROFILE)
+
+
+def record_stage(stage: str, duration: float) -> None:
+    """Accumulate a wall-clock duration into the shared parse profile.
+
+    Lets callers outside rust_parser.py (e.g. Linter.parse_string) report
+    into the same profile dict as the rust_core/convert/apply/apply_as_tree
+    stages, so external overhead (config copy, lexing/templating) can be
+    compared on equal footing. No-op unless profiling is enabled.
+    """
+    if not _PROFILE_ENABLED:
+        return
+    _PARSE_PROFILE[stage] = _PARSE_PROFILE.get(stage, 0.0) + duration
 
 
 # --- Native AST construction (experimental) ------------------------------------
