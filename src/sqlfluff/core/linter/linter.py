@@ -411,11 +411,14 @@ class Linter:
         _lexing_time = 0.0
         _parsing_time = 0.0
 
+        from sqlfluff.core.parser.rust_parser import record_stage
+
         for idx, variant in enumerate(rendered.templated_variants):
             t0 = time.monotonic()
             linter_logger.info("Parse Rendered. Lexing Variant %s", idx)
             tokens, lex_errors = cls._lex_templated_file(variant, rendered.config)
             t1 = time.monotonic()
+            record_stage("lex_templated_file", t1 - t0)
             linter_logger.info("Parse Rendered. Parsing Variant %s", idx)
             if tokens:
                 parsed, parse_errors = cls._parse_tokens(
@@ -1015,11 +1018,17 @@ class Linter:
             self.formatter.dispatch_template_header(fname, self.config, config)
 
         # Just use the local config from here:
+        from sqlfluff.core.parser.rust_parser import record_stage
+
+        _ts = time.perf_counter()
         config = (config or self.config).copy()
+        record_stage("config_copy", time.perf_counter() - _ts)
 
         # Scan the raw file for config commands.
         config.process_raw_file_for_config(in_str, fname)
+        _ts = time.perf_counter()
         rendered = self.render_string(in_str, fname, config, encoding)
+        record_stage("render_string", time.perf_counter() - _ts)
         violations += rendered.templater_violations
 
         # Dispatch the output for the parse header
