@@ -93,3 +93,9 @@ strip = false
 [profile.release]
 debug = false
 strip = true
+# Full (fat) LTO + a single codegen unit let calls inline across the workspace
+# crates (parser <-> types <-> lexer), which the hot parse loop crosses
+# constantly (token accessors, grammar-table lookups). Measurably fewer
+# instructions per parse at the cost of a slower release build.
+lto = "fat"
+codegen-units = 1
