@@ -153,21 +153,20 @@ impl Node {
         instance_types: &[String],
         raw_class_class_types: &[String],
     ) -> Vec<String> {
+        // NOTE: Runs once per constructed raw node. The inputs are tiny (a
+        // handful of entries), so deduplicate with a linear scan over the
+        // output instead of a HashSet<String> - the set cost an extra String
+        // clone per entry plus a hash-set allocation per node.
         let capacity = instance_types.len() + raw_class_class_types.len() + 1;
         let mut ct: Vec<String> = Vec::with_capacity(capacity);
-        let mut seen: HashSet<String> = HashSet::with_capacity(capacity);
-
-        for t in instance_types {
-            if seen.insert(t.clone()) {
-                ct.push(t.clone());
-            }
-        }
-        if seen.insert(segment_type.to_string()) {
-            ct.push(segment_type.to_string());
-        }
-        for t in raw_class_class_types {
-            if seen.insert(t.clone()) {
-                ct.push(t.clone());
+        for t in instance_types
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(segment_type))
+            .chain(raw_class_class_types.iter().map(String::as_str))
+        {
+            if !ct.iter().any(|existing| existing == t) {
+                ct.push(t.to_string());
             }
         }
         ct

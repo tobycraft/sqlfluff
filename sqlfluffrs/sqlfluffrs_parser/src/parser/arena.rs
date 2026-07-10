@@ -107,8 +107,12 @@ pub(crate) struct PathStep {
 impl Arena {
     // -- construction --------------------------------------------------------
 
-    /// Build an arena from an existing [`Node`] tree.
-    pub(crate) fn from_node(node: &Node) -> Self {
+    /// Build an arena from an owned [`Node`] tree.
+    ///
+    /// Takes the tree by value so per-node strings/vectors are moved into
+    /// the arena rather than cloned (one tree per parse; the `Node` tree is
+    /// otherwise discarded immediately after ingestion).
+    pub(crate) fn from_node(node: Node) -> Self {
         let mut arena = Arena {
             nodes: Vec::new(),
             root: NodeId(0),
@@ -149,7 +153,7 @@ impl Arena {
         id
     }
 
-    fn ingest(&mut self, node: &Node, parent: Option<NodeId>, parent_idx: usize) -> NodeId {
+    fn ingest(&mut self, node: Node, parent: Option<NodeId>, parent_idx: usize) -> NodeId {
         match node {
             Node::Raw {
                 segment_class,
@@ -161,14 +165,14 @@ impl Arena {
                 segment_kwargs,
             } => self.alloc(
                 ArenaKind::Raw {
-                    segment_class: segment_class.clone(),
-                    segment_type: segment_type.clone(),
-                    raw: raw.clone(),
-                    instance_types: instance_types.clone(),
-                    class_types: class_types.clone(),
-                    kwargs: segment_kwargs.clone(),
+                    segment_class,
+                    segment_type,
+                    raw,
+                    instance_types,
+                    class_types,
+                    kwargs: segment_kwargs,
                 },
-                pos_marker.clone(),
+                pos_marker,
                 parent,
                 parent_idx,
             ),
@@ -181,16 +185,16 @@ impl Arena {
             } => {
                 let id = self.alloc(
                     ArenaKind::Segment {
-                        segment_class: segment_class.clone(),
-                        segment_type: segment_type.clone(),
-                        class_types: class_types.clone(),
+                        segment_class,
+                        segment_type,
+                        class_types,
                     },
-                    pos_marker.clone(),
+                    pos_marker,
                     parent,
                     parent_idx,
                 );
                 let child_ids: Vec<NodeId> = children
-                    .iter()
+                    .into_iter()
                     .enumerate()
                     .map(|(i, c)| self.ingest(c, Some(id), i))
                     .collect();
@@ -203,15 +207,13 @@ impl Arena {
                 children,
             } => {
                 let id = self.alloc(
-                    ArenaKind::Unparsable {
-                        expected: expected.clone(),
-                    },
-                    pos_marker.clone(),
+                    ArenaKind::Unparsable { expected },
+                    pos_marker,
                     parent,
                     parent_idx,
                 );
                 let child_ids: Vec<NodeId> = children
-                    .iter()
+                    .into_iter()
                     .enumerate()
                     .map(|(i, c)| self.ingest(c, Some(id), i))
                     .collect();
@@ -222,10 +224,8 @@ impl Arena {
                 meta_type,
                 pos_marker,
             } => self.alloc(
-                ArenaKind::Meta {
-                    meta_type: meta_type.clone(),
-                },
-                pos_marker.clone(),
+                ArenaKind::Meta { meta_type },
+                pos_marker,
                 parent,
                 parent_idx,
             ),
@@ -759,14 +759,15 @@ mod tests {
     #[test]
     fn raw_matches_node() {
         let node = select_tree();
-        let arena = Arena::from_node(&node);
-        assert_eq!(arena.raw(arena.root()), node.raw());
+        let expected_raw = node.raw();
+        let arena = Arena::from_node(node);
+        assert_eq!(arena.raw(arena.root()), expected_raw);
         assert_eq!(arena.raw(arena.root()), "SELECT a");
     }
 
     #[test]
     fn is_type_uses_class_types() {
-        let arena = Arena::from_node(&select_tree());
+        let arena = Arena::from_node(select_tree());
         let root = arena.root();
         // statement node
         assert!(arena.is_type(root, "statement"));
@@ -779,7 +780,7 @@ mod tests {
 
     #[test]
     fn recursive_crawl_finds_descendants() {
-        let arena = Arena::from_node(&select_tree());
+        let arena = Arena::from_node(select_tree());
         let kws = arena.recursive_crawl(arena.root(), &["keyword".to_string()], true, &[], true);
         assert_eq!(kws.len(), 1);
         assert_eq!(arena.raw(kws[0]), "SELECT");
@@ -797,7 +798,7 @@ mod tests {
 
     #[test]
     fn raw_segments_in_order() {
-        let arena = Arena::from_node(&select_tree());
+        let arena = Arena::from_node(select_tree());
         let raws = arena.raw_segments(arena.root());
         let texts: Vec<String> = raws.iter().map(|&r| arena.raw(r)).collect();
         assert_eq!(texts, vec!["SELECT", " ", "a"]);
@@ -805,7 +806,7 @@ mod tests {
 
     #[test]
     fn parent_links_and_path() {
-        let arena = Arena::from_node(&select_tree());
+        let arena = Arena::from_node(select_tree());
         let root = arena.root();
         let raws = arena.raw_segments(root);
         let ident = *raws.last().unwrap();
@@ -822,7 +823,7 @@ mod tests {
 
     #[test]
     fn descendant_type_set_includes_nested() {
-        let arena = Arena::from_node(&select_tree());
+        let arena = Arena::from_node(select_tree());
         let dts = arena.descendant_type_set(arena.root());
         assert!(dts.contains("keyword"));
         assert!(dts.contains("naked_identifier"));
@@ -831,7 +832,7 @@ mod tests {
 
     #[test]
     fn is_code_and_whitespace() {
-        let arena = Arena::from_node(&select_tree());
+        let arena = Arena::from_node(select_tree());
         let raws = arena.raw_segments(arena.root());
         // SELECT is code, " " is whitespace
         assert!(arena.is_code(raws[0]));
@@ -857,7 +858,7 @@ mod tests {
                 raw("WhitespaceSegment", "whitespace", " ", &["whitespace"]),
             ],
         };
-        let arena = Arena::from_node(&tree);
+        let arena = Arena::from_node(tree);
         let root = arena.root();
         let indent = vec!["indent".to_string()];
         let child = arena.get_child(root, &indent).expect("indent meta found");

@@ -457,7 +457,7 @@ impl PyMatchResult {
             .0
             .clone()
             .apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
-        super::arena_py::PyTree::new(super::arena::Arena::from_node(&node))
+        super::arena_py::PyTree::new(super::arena::Arena::from_node(node))
     }
 }
 
@@ -729,7 +729,7 @@ impl PyParser {
         // exception and fell back), so keep them non-fatal here too.
         let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let node = match_result.apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
-            super::arena_py::PyTree::new(super::arena::Arena::from_node(&node))
+            super::arena_py::PyTree::new(super::arena::Arena::from_node(node))
         }))
         .ok();
 
