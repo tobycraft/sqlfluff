@@ -914,6 +914,18 @@ try:
     # Dynamically generate the segment_types map
     segment_types = get_segment_type_map(RawSegment)
 
+    # Subset of segment_types whose `from_rstoken` is the plain RawSegment
+    # implementation. For these, `lex()` can construct the segment directly
+    # from the batched per-token data returned by `_lex_segment_data` (a
+    # single boundary crossing) instead of calling ~10 PyO3 getters per
+    # token. Classes with a custom `from_rstoken` (e.g. MetaSegment,
+    # TemplateSegment) always take the per-token path.
+    _fast_segment_types = {
+        seg_type: seg_cls
+        for seg_type, seg_cls in segment_types.items()
+        if seg_cls.from_rstoken.__func__ is RawSegment.from_rstoken.__func__
+    }
+
     class PyRsLexer(RsLexer):
         """A wrapper around the sqlfluffrs lexer."""
 
@@ -934,20 +946,85 @@ try:
         ) -> tuple[tuple[BaseSegment, ...], list[SQLLexError]]:
             """Take a string or TemplatedFile and return segments."""
             lexer_logger.info("Lexing file using RsLexer.")
-            tokens, errors = self._lex(raw)
-            first_token = tokens[0]
-            assert first_token
-            template = first_token.pos_marker.templated_file
-            py_template = TemplatedFile(
-                template.source_str,
-                template.fname,
-                template.templated_str,
-                template.sliced_file,  # type: ignore
-                template.raw_sliced,  # type: ignore
-            )
+            tokens, errors, seg_data = self._lex_segment_data(raw)
+            if isinstance(raw, TemplatedFile):
+                # The lexer only reads the templated file, so position markers
+                # can reference the caller's object directly rather than
+                # re-building (and re-validating) an equivalent copy from the
+                # Rust side.
+                py_template = raw
+            else:
+                first_token = tokens[0]
+                assert first_token
+                template = first_token.pos_marker.templated_file
+                py_template = TemplatedFile(
+                    template.source_str,
+                    template.fname,
+                    template.templated_str,
+                    template.sliced_file,  # type: ignore
+                    template.raw_sliced,  # type: ignore
+                )
+
+            fast_types = _fast_segment_types
+            segments: list[BaseSegment] = []
+            for token, data in zip(tokens, seg_data):
+                cls = fast_types.get(data[0]) if data is not None else None
+                if cls is None:
+                    # Missing marker data or a class with custom from_rstoken.
+                    segments.append(
+                        segment_types.get(token.type, RawSegment).from_rstoken(
+                            token, py_template
+                        )
+                    )
+                    continue
+                (
+                    _,
+                    raw_str,
+                    src_start,
+                    src_stop,
+                    tmpl_start,
+                    tmpl_stop,
+                    line_no,
+                    line_pos,
+                    instance_types,
+                    trim_start,
+                    trim_chars,
+                    uuid,
+                    quoted_value,
+                    escape_replacements,
+                    source_fixes,
+                ) = data
+                segment = cls(
+                    raw=raw_str,
+                    # Passing the working position up front skips the newline
+                    # bisect in PositionMarker.__post_init__; the values are
+                    # computed identically (from the templated start offset)
+                    # on the Rust side. The explicit step of 1 matches the
+                    # slice objects the RsPositionMarker getters produce, so
+                    # markers from this path compare equal to ones built via
+                    # from_rstoken.
+                    pos_marker=PositionMarker(
+                        slice(src_start, src_stop, 1),
+                        slice(tmpl_start, tmpl_stop, 1),
+                        py_template,
+                        line_no,
+                        line_pos,
+                    ),
+                    instance_types=instance_types,
+                    trim_start=trim_start,
+                    trim_chars=trim_chars,
+                    source_fixes=source_fixes,
+                    uuid=uuid,
+                    quoted_value=quoted_value,
+                    escape_replacements=escape_replacements,
+                )
+                # Cache the original RsToken for efficient round-trip to the
+                # Rust parser (mirrors RawSegment.from_rstoken).
+                segment._rstoken = token
+                segments.append(segment)
 
             return (
-                self._tokens_to_segments(tokens, py_template),
+                tuple(segments),
                 [SQLLexError.from_rs_error(error) for error in errors],
             )
 

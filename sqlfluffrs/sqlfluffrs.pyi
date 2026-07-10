@@ -152,6 +152,9 @@ class RsLexer:
     def _lex(
         self, lex_input: Union[str, "TemplatedFile"]
     ) -> Tuple[List[RsToken], List[Any]]: ...
+    def _lex_segment_data(
+        self, lex_input: Union[str, "TemplatedFile"]
+    ) -> Tuple[List[RsToken], List[Any], List[Optional[tuple]]]: ...
 
 class RsMatchResult:
     """Result of a Rust parser match operation."""

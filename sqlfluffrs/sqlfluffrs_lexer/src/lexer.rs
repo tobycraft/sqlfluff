@@ -968,5 +968,122 @@ pub mod python {
             let obj = (token_tuple, violation_list);
             obj.into_pyobject(py)
         }
+
+        /// Lex and additionally return per-token segment-construction data.
+        ///
+        /// Returns `(tokens, violations, seg_data)` where `seg_data[i]` is a
+        /// 15-tuple for `tokens[i]`:
+        /// `(type, raw, src_start, src_stop, tmpl_start, tmpl_stop, line_no,
+        ///   line_pos, instance_types, trim_start, trim_chars, uuid,
+        ///   quoted_value, escape_replacements, source_fixes)`
+        /// or `None` when the token has no position marker (callers fall back
+        /// to the per-token getter path).
+        ///
+        /// This exists so the Python lexer wrapper can build `RawSegment`s
+        /// with a single boundary crossing instead of ~10 PyO3 attribute
+        /// getters per token. `line_no`/`line_pos` are the working position
+        /// of the templated start offset - exactly what Python's
+        /// `PositionMarker.__post_init__` would compute via bisect - so the
+        /// Python side can construct fully-initialised `PositionMarker`s
+        /// without touching the newline index. Type and instance-type
+        /// strings are interned per call so repeated values share one
+        /// Python string object.
+        #[pyo3(signature = (input, template_blocks_indent = true))]
+        pub fn _lex_segment_data<'py>(
+            &self,
+            py: Python<'py>,
+            input: PyLexInput,
+            template_blocks_indent: bool,
+        ) -> Result<Bound<'py, PyTuple>, PyErr> {
+            use pyo3::types::PyString;
+            use sqlfluffrs_python::token::PySourceFix;
+
+            let (tokens, violations) = self.0.lex(input.into(), template_blocks_indent);
+
+            let mut interned: std::collections::HashMap<&str, Py<PyString>> =
+                std::collections::HashMap::new();
+            fn intern<'a, 'py>(
+                py: Python<'py>,
+                interned: &mut std::collections::HashMap<&'a str, Py<PyString>>,
+                s: &'a str,
+            ) -> Py<PyString> {
+                interned
+                    .entry(s)
+                    .or_insert_with(|| PyString::new(py, s).unbind())
+                    .clone_ref(py)
+            }
+
+            let seg_data = PyList::empty(py);
+            for token in &tokens {
+                let Some(pm) = token.pos_marker.as_ref() else {
+                    seg_data.append(py.None())?;
+                    continue;
+                };
+                let (line_no, line_pos) = pm
+                    .templated_file
+                    .get_line_pos_of_char_pos(pm.templated_slice.start, false);
+                let type_obj = intern(py, &mut interned, token.token_type.as_ref());
+                let instance_types = PyTuple::new(
+                    py,
+                    token
+                        .instance_types
+                        .iter()
+                        .map(|s| intern(py, &mut interned, s.as_str())),
+                )?;
+                let quoted_value = token.quoted_value().map(|(pattern, group)| {
+                    let py_group: Py<PyAny> = match group {
+                        sqlfluffrs_types::regex::RegexModeGroup::Index(idx) => {
+                            idx.into_pyobject(py).unwrap().unbind().into()
+                        }
+                        sqlfluffrs_types::regex::RegexModeGroup::Name(name) => {
+                            PyString::new(py, name).unbind().into()
+                        }
+                    };
+                    (pattern.clone(), py_group)
+                });
+                let escape_replacements = token
+                    .escape_replacement()
+                    .map(|(pattern, repl)| vec![(pattern.clone(), repl.clone())]);
+                let source_fixes: Option<Vec<PySourceFix>> = token
+                    .source_fixes
+                    .as_ref()
+                    .map(|v| v.iter().map(|f| PySourceFix(f.clone())).collect());
+                // NOTE: 15 elements - beyond IntoPyObject's tuple limit -
+                // so the row tuple is assembled manually.
+                let row_items: [Py<PyAny>; 15] = [
+                    type_obj.into_any(),
+                    PyString::new(py, token.raw()).unbind().into_any(),
+                    pm.source_slice.start.into_pyobject(py)?.unbind().into_any(),
+                    pm.source_slice.stop.into_pyobject(py)?.unbind().into_any(),
+                    pm.templated_slice.start.into_pyobject(py)?.unbind().into_any(),
+                    pm.templated_slice.stop.into_pyobject(py)?.unbind().into_any(),
+                    line_no.into_pyobject(py)?.unbind().into_any(),
+                    line_pos.into_pyobject(py)?.unbind().into_any(),
+                    instance_types.unbind().into_any(),
+                    token.trim_start.as_ref().into_pyobject(py)?.unbind().into_any(),
+                    token.trim_chars.as_ref().into_pyobject(py)?.unbind().into_any(),
+                    token.uuid.into_pyobject(py)?.unbind().into_any(),
+                    quoted_value.into_pyobject(py)?.unbind().into_any(),
+                    escape_replacements.into_pyobject(py)?.unbind().into_any(),
+                    source_fixes.into_pyobject(py)?.unbind().into_any(),
+                ];
+                seg_data.append(PyTuple::new(py, row_items)?)?;
+            }
+
+            let token_tuple = PyTuple::new(
+                py,
+                tokens.into_iter().map(Into::into).collect::<Vec<PyToken>>(),
+            )?;
+            let violation_list = PyList::new(
+                py,
+                violations
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<PySQLLexError>>(),
+            )?;
+
+            let obj = (token_tuple, violation_list, seg_data);
+            obj.into_pyobject(py)
+        }
     }
 }
