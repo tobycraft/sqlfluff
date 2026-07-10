@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::regex::RegexModeGroup;
 
@@ -22,14 +22,19 @@ struct NormalizeSpec {
 /// A raw token string together with the forms derived from it: its uppercase
 /// version, and its normalized version. Co-locating them keeps the derived
 /// forms in sync with `raw` and keeps the eager work out of the hot path.
+///
+/// The contents are `Arc`-backed: tokens are cloned wholesale at the
+/// Python/Rust boundary (every PyToken extraction clones the underlying
+/// `Token`), so cloning a `RawString` must be a refcount bump rather than
+/// fresh string allocations.
 #[derive(Debug, Clone)]
 pub struct RawString {
-    raw: String,
+    raw: Arc<str>,
     /// Uppercase form. `None` when it is identical to `raw` (whitespace,
     /// punctuation, numbers, already-uppercase text), avoiding a duplicate
     /// allocation for the many tokens with no lowercase letters.
-    raw_upper: Option<String>,
-    spec: Option<Box<NormalizeSpec>>,
+    raw_upper: Option<Arc<str>>,
+    spec: Option<Arc<NormalizeSpec>>,
 }
 
 impl RawString {
@@ -43,12 +48,12 @@ impl RawString {
         let raw_upper = if raw.is_ascii() && !raw.bytes().any(|b| b.is_ascii_lowercase()) {
             None
         } else {
-            Some(raw.to_uppercase())
+            Some(Arc::from(raw.to_uppercase()))
         };
         let spec =
             if quoted_value.is_some() || escape_replacement.is_some() || casefold != CaseFold::None
             {
-                Some(Box::new(NormalizeSpec {
+                Some(Arc::new(NormalizeSpec {
                     quoted_value,
                     escape_replacement,
                     casefold,
@@ -58,7 +63,7 @@ impl RawString {
                 None
             };
         Self {
-            raw,
+            raw: Arc::from(raw),
             raw_upper,
             spec,
         }
