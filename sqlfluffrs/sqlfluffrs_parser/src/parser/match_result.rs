@@ -15,7 +15,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::parser::types::{MetaType, Node, RawSegmentKwargs};
-use hashbrown::HashMap;
 use sqlfluffrs_types::regex::RegexModeGroup;
 use sqlfluffrs_types::token::CaseFold;
 use sqlfluffrs_types::{PositionMarker, Token};
@@ -501,73 +500,75 @@ impl MatchResult {
             return result;
         }
 
-        // Build a map of positions to things to insert/apply
-        let mut trigger_map: HashMap<usize, Vec<TriggerItem>> = HashMap::new();
+        // Process inserts and children merged by position. The previous
+        // implementation built a HashMap<usize, Vec<TriggerItem>> plus a
+        // sorted key Vec per node - several heap allocations per applied
+        // node. Both lists are processed stably sorted by position, with
+        // inserts before children at equal positions, exactly reproducing
+        // the trigger-map ordering (inserts were pushed to each trigger
+        // location first).
+        let mut inserts = self.insert_segments;
+        inserts.sort_by_key(|(idx, _)| *idx);
+        let mut children = self.child_matches;
+        children.sort_by_key(|c| c.matched_slice.start);
+        // Captured for the single-token retag check below (the vectors
+        // themselves are consumed by the merge loop).
+        let no_children = children.is_empty();
+        let no_inserts = inserts.is_empty();
 
-        // Add meta segments
-        for (idx, meta_type) in &self.insert_segments {
-            trigger_map
-                .entry(*idx)
-                .or_default()
-                .push(TriggerItem::Meta(meta_type.clone()));
-        }
-
-        // Add child matches — store Arc directly, avoid deep clone
-        for child_rc in &self.child_matches {
-            trigger_map
-                .entry(child_rc.matched_slice.start)
-                .or_default()
-                .push(TriggerItem::ChildMatch(Arc::clone(child_rc)));
-        }
-
-        // Walk through the slice, processing triggers at each position
         let mut result_nodes: Vec<Node> = vec![];
         let mut current_idx = self.matched_slice.start;
+        let mut ins_i = 0;
 
-        // Get sorted trigger positions
-        let mut positions: Vec<usize> = trigger_map.keys().copied().collect();
-        positions.sort();
-
-        for pos in positions {
-            // PYTHON PARITY: Fill gap with all tokens between child matches.
-            // Meta tokens become Node::Meta, non-meta become Node::Raw.
-            // This matches Python's `result_segments += segments[max_idx:idx]`
-            // which includes ALL segments (including meta) in gap-fill.
-            if pos > current_idx {
-                for idx in current_idx..pos {
-                    if idx < tokens.len() {
-                        result_nodes.push(token_to_node(&tokens[idx]));
-                    }
-                }
-                current_idx = pos;
-            } else if pos < current_idx {
-                panic!(
-                    "Trigger position {} is before current_idx {}",
-                    pos, current_idx
-                );
-            }
-
-            // Process triggers at this position — remove from map to take ownership
-            if let Some(triggers) = trigger_map.remove(&pos) {
-                for trigger in triggers {
-                    match trigger {
-                        TriggerItem::Meta(meta_type) => {
-                            let pos_marker = get_point_pos_at_token_idx(tokens, pos);
-                            result_nodes.push(meta_to_node(&meta_type, pos_marker));
-                        }
-                        TriggerItem::ChildMatch(child_arc) => {
-                            let end = child_arc.matched_slice.end;
-                            // try_unwrap avoids a deep clone when refcount==1
-                            let child_owned =
-                                Arc::try_unwrap(child_arc).unwrap_or_else(|arc| (*arc).clone());
-                            let child_node = child_owned.apply(tokens);
-                            // Only add non-empty nodes
-                            result_nodes.extend(child_node);
-                            current_idx = end;
+        // PYTHON PARITY (gap-fill): fill with all tokens between triggers.
+        // Meta tokens become Node::Meta, non-meta become Node::Raw. This
+        // matches Python's `result_segments += segments[max_idx:idx]` which
+        // includes ALL segments (including meta) in gap-fill.
+        macro_rules! advance_to {
+            ($pos:expr) => {{
+                let pos = $pos;
+                if pos > current_idx {
+                    for idx in current_idx..pos {
+                        if idx < tokens.len() {
+                            result_nodes.push(token_to_node(&tokens[idx]));
                         }
                     }
+                    current_idx = pos;
+                } else if pos < current_idx {
+                    panic!(
+                        "Trigger position {} is before current_idx {}",
+                        pos, current_idx
+                    );
                 }
+            }};
+        }
+
+        for child_arc in children {
+            let child_start = child_arc.matched_slice.start;
+            // Metas at or before this child come first.
+            while ins_i < inserts.len() && inserts[ins_i].0 <= child_start {
+                let (idx, ref meta_type) = inserts[ins_i];
+                advance_to!(idx);
+                let pos_marker = get_point_pos_at_token_idx(tokens, idx);
+                result_nodes.push(meta_to_node(meta_type, pos_marker));
+                ins_i += 1;
             }
+            advance_to!(child_start);
+            let end = child_arc.matched_slice.end;
+            // try_unwrap avoids a deep clone when refcount==1
+            let child_owned = Arc::try_unwrap(child_arc).unwrap_or_else(|arc| (*arc).clone());
+            let child_node = child_owned.apply(tokens);
+            // Only add non-empty nodes
+            result_nodes.extend(child_node);
+            current_idx = end;
+        }
+        // Any remaining metas after the last child.
+        while ins_i < inserts.len() {
+            let (idx, ref meta_type) = inserts[ins_i];
+            advance_to!(idx);
+            let pos_marker = get_point_pos_at_token_idx(tokens, idx);
+            result_nodes.push(meta_to_node(meta_type, pos_marker));
+            ins_i += 1;
         }
 
         // PYTHON PARITY: If we finish processing triggers and there are still tokens
@@ -598,8 +599,8 @@ impl MatchResult {
             // This path fires for ALL single-token base parser matches (no
             // hardcoded allowlist) so that every parser-assigned type gets
             // correct class_types from the codegen-provided raw_class hierarchy.
-            if self.child_matches.is_empty()
-                && self.insert_segments.is_empty()
+            if no_children
+                && no_inserts
                 && self.matched_slice.end == self.matched_slice.start + 1
                 && result_nodes.len() == 1
                 && !match_class.is_unparsable()
@@ -781,13 +782,6 @@ pub fn segment_kwargs_from_token(
         quoted_value: tok.quoted_value().cloned(),
         ..Default::default()
     }
-}
-
-/// Internal enum for tracking what to process at each position
-#[derive(Debug)]
-enum TriggerItem {
-    Meta(MetaSegment),
-    ChildMatch(Arc<MatchResult>),
 }
 
 /// Get a point position marker at a given token index.
