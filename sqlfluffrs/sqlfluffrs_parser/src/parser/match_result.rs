@@ -111,11 +111,34 @@ pub struct MatchResult {
 
     /// Child matches (recursive structure using Rc for cheap sharing)
     pub child_matches: Vec<Arc<MatchResult>>,
+
+    /// Cached recursive node count (see [`MatchResult::node_count`]).
+    ///
+    /// The parser checks `node_count()` against `max_parse_nodes` every time
+    /// a frame commits a result, and subtrees are shared via `Arc`, so
+    /// without a cache the same subtree is re-counted at every enclosing
+    /// commit - accidentally quadratic on deep trees. Match results are
+    /// never mutated after construction, so a once-cell is safe; cloning
+    /// resets the cache (see the manual `Clone` impl on `NodeCountCache`).
+    pub node_count_cache: NodeCountCache,
+}
+
+/// Once-cell cache for [`MatchResult::node_count`] that resets on clone.
+#[derive(Debug, Default)]
+pub struct NodeCountCache(std::sync::OnceLock<usize>);
+
+impl Clone for NodeCountCache {
+    fn clone(&self) -> Self {
+        // A clone is a distinct value that callers may (in principle) modify
+        // before freezing, so don't carry the cached count across.
+        Self::default()
+    }
 }
 
 impl Default for MatchResult {
     fn default() -> Self {
         MatchResult {
+            node_count_cache: Default::default(),
             matched_slice: 0..0,
             matched_class: None,
             insert_segments: vec![],
@@ -181,6 +204,7 @@ impl MatchResult {
                 match Arc::try_unwrap(child_arc) {
                     Ok(owned) => {
                         return MatchResult {
+                            node_count_cache: Default::default(),
                             matched_slice: start_idx..end_idx,
                             matched_class,
                             child_matches: owned.child_matches,
@@ -189,6 +213,7 @@ impl MatchResult {
                     }
                     Err(shared) => {
                         return MatchResult {
+                            node_count_cache: Default::default(),
                             matched_slice: start_idx..end_idx,
                             matched_class,
                             child_matches: shared.child_matches.clone(),
@@ -251,6 +276,7 @@ impl MatchResult {
         };
 
         MatchResult {
+            node_count_cache: Default::default(),
             matched_slice: start_idx..end_idx,
             matched_class,
             child_matches: children,
@@ -313,16 +339,20 @@ impl MatchResult {
     }
 
     /// Count the number of materialized nodes implied by this match tree.
+    ///
+    /// Cached per node (and therefore per shared `Arc` subtree): the parser
+    /// calls this on every frame commit, so an uncached walk made the limit
+    /// check quadratic in tree depth.
     pub fn node_count(&self) -> usize {
-        let class_count = usize::from(self.matched_class.is_some());
-        let insert_count = self.insert_segments.len();
-        class_count
-            + insert_count
-            + self
-                .child_matches
-                .iter()
-                .map(|child| child.node_count())
-                .sum::<usize>()
+        *self.node_count_cache.0.get_or_init(|| {
+            usize::from(self.matched_class.is_some())
+                + self.insert_segments.len()
+                + self
+                    .child_matches
+                    .iter()
+                    .map(|child| child.node_count())
+                    .sum::<usize>()
+        })
     }
 
     /// Combine another sequential match onto this one.
@@ -377,6 +407,7 @@ impl MatchResult {
         }
 
         Arc::new(MatchResult {
+            node_count_cache: Default::default(),
             matched_slice: new_slice,
             matched_class: None,
             insert_segments,
@@ -414,6 +445,7 @@ impl MatchResult {
             // Extract matched_slice before moving self into Arc.
             let matched_slice = self.matched_slice.clone();
             MatchResult {
+                node_count_cache: Default::default(),
                 matched_slice,
                 matched_class: Some(outer_class),
                 insert_segments,
@@ -425,6 +457,7 @@ impl MatchResult {
             let mut new_insert_segments = self.insert_segments;
             new_insert_segments.extend(insert_segments);
             MatchResult {
+                node_count_cache: Default::default(),
                 matched_slice: self.matched_slice,
                 matched_class: Some(outer_class),
                 insert_segments: new_insert_segments,
@@ -666,6 +699,7 @@ impl MatchResult {
     ///   trailing newline + end_of_file).  Pass `&[]` when there are none.
     pub fn apply_as_root(self, tokens: &[Token], leading: &[Token], trailing: &[Token]) -> Node {
         let file_mr = MatchResult {
+            node_count_cache: Default::default(),
             matched_slice: 0..tokens.len(),
             matched_class: Some(MatchedClass::root()),
             insert_segments: vec![],

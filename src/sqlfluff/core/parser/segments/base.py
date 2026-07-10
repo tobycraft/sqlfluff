@@ -234,7 +234,10 @@ class BaseSegment(metaclass=SegmentMetaclass):
 
         self.set_as_parent(recurse=False)
         self.validate_non_code_ends()
-        self._recalculate_caches()
+        # NOTE: No cache invalidation here. On a freshly constructed instance
+        # nothing else holds a reference to `self` yet, so no cached_property
+        # can have been populated - popping the cache keys from a fresh
+        # __dict__ was pure overhead on the parser's hot path.
 
     def __setattr__(self, key: str, value: Any) -> None:
         try:
@@ -1319,21 +1322,28 @@ class BaseSegment(metaclass=SegmentMetaclass):
         The exception is for segments which configure `can_start_end_non_code`
         for which not check is conducted.
 
+        NOTE: This runs on every segment construction, so the checks are
+        inlined (rather than calling `_is_code_or_meta`) to keep the per-node
+        overhead minimal.
+
         TODO: Check whether it's only `can_start_end_non_code` is only set for
         FileSegment, in which case - take away the config and just override
         this method for that segment.
         """
         if self.can_start_end_non_code:
             return None
-        if not self.segments:  # pragma: no cover
+        segments = self.segments
+        if not segments:  # pragma: no cover
             return None
-        assert self._is_code_or_meta(self.segments[0]), (
+        _first = segments[0]
+        assert _first.is_code or _first.is_meta, (
             f"Segment {self} starts with whitespace segment: "
-            f"{self.segments[0].raw!r}.\n{self.segments!r}"
+            f"{segments[0].raw!r}.\n{segments!r}"
         )
-        assert self._is_code_or_meta(self.segments[-1]), (
+        _last = segments[-1]
+        assert _last.is_code or _last.is_meta, (
             f"Segment {self} ends with whitespace segment: "
-            f"{self.segments[-1].raw!r}.\n{self.segments!r}"
+            f"{segments[-1].raw!r}.\n{segments!r}"
         )
 
     def validate_segment_with_reparse(
