@@ -160,6 +160,12 @@ For detailed instructions on specific components, refer to:
 - **Rust components**: `sqlfluffrs/AGENTS.md`
 - **Testing**: `test/AGENTS.md`
 - **Documentation**: `docs/AGENTS.md`
+- **Parse-performance history**: `sqlfluffrs/PERF_LOG.md` — read this BEFORE
+  attempting parser or benchmark performance work. It records the measured
+  wins (−53.5% on the TPC-DS instruction-count benchmark), the measurement
+  methodology, and — critically — the approaches that were tried and
+  measured to be regressions (keyword dispatch tables, two-token hints,
+  frame free-lists), so they aren't re-attempted from scratch.
 
 ## Common Pitfalls
 
