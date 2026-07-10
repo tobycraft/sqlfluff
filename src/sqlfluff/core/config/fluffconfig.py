@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from copy import copy, deepcopy
+from copy import copy
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -32,6 +32,25 @@ if TYPE_CHECKING:  # pragma: no cover
 
 # Instantiate the config logger
 config_logger = logging.getLogger("sqlfluff.config")
+
+
+def _copy_config_value(value: Any) -> Any:
+    """Recursively copy a config value (dicts and lists only).
+
+    A targeted replacement for ``copy.deepcopy`` on the ``_configs`` mapping,
+    which is copied on every ``FluffConfig.copy()`` call - i.e. once per
+    parsed file - so it's on the linter's hot path. Config structure is
+    nested dicts and lists of plain values; those containers are copied so
+    that mutation of a copy (e.g. inline config directives) can't leak back
+    into the original, while leaf values (strings, numbers, and large
+    effectively-immutable objects like ``dialect_obj`` and ``templater_obj``)
+    are shared by reference rather than duplicated.
+    """
+    if isinstance(value, dict):
+        return {k: _copy_config_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_config_value(v) for v in value]
+    return value
 
 
 class FluffConfig:
@@ -260,16 +279,7 @@ class FluffConfig:
             :obj:`FluffConfig`: A shallow copy of this config object but with
             a deep copy of the internal ``_configs`` dict.
         """
-        core = self._configs["core"]
-        # `dialect_obj` and `templater_obj` are large, effectively immutable
-        # (never reassigned in place after construction) and safe to share
-        # across copies. `dialect_obj` in particular is a fully expanded
-        # grammar object graph, so deep-copying it on every `.copy()` call
-        # (i.e. on every parse) would dominate parse time. Seed deepcopy's
-        # memo so it reuses these references instead of duplicating them.
-        shared = (core.get("dialect_obj"), core.get("templater_obj"))
-        memo = {id(obj): obj for obj in shared if obj is not None}
-        configs_attribute_copy = deepcopy(self._configs, memo)
+        configs_attribute_copy = _copy_config_value(self._configs)
 
         config_copy = copy(self)
         config_copy._configs = configs_attribute_copy
