@@ -244,39 +244,80 @@ try:
                     segments[_start_idx:_end_idx]
                 )
 
+                code_segments = segments[_start_idx:_end_idx]
+
                 # Parse using Rust parser to get MatchResult
                 # The Rust parser may raise RsParseError for certain parse errors (e.g.,
                 # missing closing brackets in terminators). We catch these and convert to
                 # SQLParseError. Regular parse errors are embedded in the MatchResult.
-                try:
-                    if _prof is not None:
-                        _ts = time.perf_counter()
-                    rs_match = self._rs_parser.parse_match_result_from_tokens(tokens)
-                    if _prof is not None:
-                        _prof["rust_core"] = time.perf_counter() - _ts
-                except RsParseError as e:
-                    # Convert Rust parse error to SQLParseError with position info
-                    raise SQLParseError.from_rs_parse_error(
-                        e, segments[_start_idx:_end_idx]
-                    ) from e
-
+                #
                 # Build the BaseSegment tree from the Rust match result.
                 # PYTHON PARITY: only the code portion (segments[_start_idx:_end_idx])
                 # is passed, since match-result indices are relative to it.
-                code_segments = segments[_start_idx:_end_idx]
                 if _NATIVE_AST_ENABLED:
-                    # Fused path: flatten the whole Rust match tree in a single
-                    # PyO3 call, then instantiate segments directly from the
-                    # flat encoding (no intermediate Python MatchResult tree
-                    # and no per-node getter traffic across the boundary).
+                    # Fused path: a single PyO3 call parses the tokens, returns
+                    # the whole match tree as a flat pre-order encoding and
+                    # builds the Rust arena tree (RsTree) - no intermediate
+                    # Python MatchResult tree, no per-node getter traffic
+                    # across the boundary and no second token conversion.
+                    # Leading/trailing non-code tokens are included so the
+                    # arena's flat raw list matches Python's raw_segments
+                    # ordering exactly (incl. EOF/trailing newline detection).
+                    leading_tokens = (
+                        self._extract_tokens_from_segments(segments[:_start_idx])
+                        if _start_idx
+                        else []
+                    )
+                    trailing_tokens = (
+                        self._extract_tokens_from_segments(segments[_end_idx:])
+                        if _end_idx < len(segments)
+                        else []
+                    )
+                    try:
+                        if _prof is not None:
+                            _ts = time.perf_counter()
+                        flat, rs_tree = self._rs_parser.parse_with_ast(
+                            tokens,
+                            leading=leading_tokens,
+                            trailing=trailing_tokens,
+                        )
+                        if _prof is not None:
+                            _prof["rust_core"] = time.perf_counter() - _ts
+                    except RsParseError as e:
+                        raise SQLParseError.from_rs_parse_error(
+                            e, code_segments
+                        ) from e
+
                     if _prof is not None:
                         _ts = time.perf_counter()
                     _matched = self._apply_flat_match(
-                        rs_match.flatten(), code_segments, parse_context
+                        flat, code_segments, parse_context
                     )
                     if _prof is not None:
                         _prof["apply"] = time.perf_counter() - _ts
+
+                    # matched_slice/truthiness come from the root node of the
+                    # flat encoding (mirrors MatchResult.matched_slice /
+                    # __bool__): flat[0] is (start, stop, ..., inserts, ...).
+                    _root = flat[0]
+                    _m_start, _m_stop = _root[0], _root[1]
+                    _match_truthy = _m_stop > _m_start or bool(_root[4])
                 else:
+                    try:
+                        if _prof is not None:
+                            _ts = time.perf_counter()
+                        rs_match = self._rs_parser.parse_match_result_from_tokens(
+                            tokens
+                        )
+                        if _prof is not None:
+                            _prof["rust_core"] = time.perf_counter() - _ts
+                    except RsParseError as e:
+                        # Convert Rust parse error to SQLParseError with position
+                        # info
+                        raise SQLParseError.from_rs_parse_error(
+                            e, code_segments
+                        ) from e
+
                     # Legacy path: rebuild a Python MatchResult, then apply it.
                     if _prof is not None:
                         _ts = time.perf_counter()
@@ -291,11 +332,14 @@ try:
                     if _prof is not None:
                         _prof["apply"] = time.perf_counter() - _ts
 
+                    # PYTHON PARITY: matched_slice/truthiness are read from
+                    # rs_match (mirrors MatchResult.matched_slice / __bool__).
+                    _m_start, _m_stop = rs_match.matched_slice
+                    _match_truthy = _m_stop > _m_start or bool(
+                        rs_match.insert_segments
+                    )
+
                 # PYTHON PARITY: Add back any unmatched segments after the match.
-                # matched_slice/truthiness are read from rs_match so both build
-                # paths agree (mirrors MatchResult.matched_slice / __bool__).
-                _m_start, _m_stop = rs_match.matched_slice
-                _match_truthy = _m_stop > _m_start or bool(rs_match.insert_segments)
                 matched_stop = _start_idx + _m_stop
                 _unmatched = segments[matched_stop:_end_idx]
 
@@ -337,44 +381,56 @@ try:
                     segments[:_start_idx] + content + segments[_end_idx:], fname=fname
                 )
 
-                # Build the mutable Rust arena tree (RsTree) from the MatchResult.
-                # This is the id-addressable façade tree (RsTree/RsHandle) used by
-                # Rust-side linting/fixing to avoid round-tripping through Python's
-                # segment tree.
-                try:
-                    # Extract leading non-code tokens (segments before _start_idx:
-                    # whitespace/newlines at the start of the file) so the arena's
-                    # flat raw list matches Python's raw_segments ordering exactly.
-                    leading_tokens = (
-                        self._extract_tokens_from_segments(segments[:_start_idx])
-                        if _start_idx
-                        else []
-                    )
-                    # Extract trailing non-code tokens (segments after _end_idx: newline,
-                    # end_of_file, etc.) and include them in the arena so that the
-                    # reflow/respace rules can correctly detect EOF and trailing newlines.
-                    trailing_tokens = (
-                        self._extract_tokens_from_segments(segments[_end_idx:])
-                        if _end_idx < len(segments)
-                        else []
-                    )
-                    if _prof is not None:
-                        _ts = time.perf_counter()
-                    result._rs_tree = rs_match.apply_as_tree(
-                        tokens,
-                        leading=leading_tokens,
-                        trailing=trailing_tokens,
-                    )
-                    if _prof is not None:
-                        _prof["apply_as_tree"] = time.perf_counter() - _ts
-                except Exception:  # pragma: no cover
-                    # Non-critical: if tree building fails, rules fall back to Python
-                    parser_logger.warning(
-                        f"Unable to apply match result in parse tree for {fname}, falling"
-                        " back to Python. Please report this as a bug with the SQL that"
-                        " caused it."
-                    )
-                    result._rs_tree = None
+                # Attach the mutable Rust arena tree (RsTree). This is the
+                # id-addressable façade tree (RsTree/RsHandle) used by
+                # Rust-side linting/fixing to avoid round-tripping through
+                # Python's segment tree.
+                if _NATIVE_AST_ENABLED:
+                    # Already built inside parse_with_ast (None on failure).
+                    result._rs_tree = rs_tree
+                    if rs_tree is None:  # pragma: no cover
+                        parser_logger.warning(
+                            f"Unable to apply match result in parse tree for {fname},"
+                            " falling back to Python. Please report this as a bug"
+                            " with the SQL that caused it."
+                        )
+                else:
+                    try:
+                        # Extract leading non-code tokens (segments before
+                        # _start_idx: whitespace/newlines at the start of the
+                        # file) so the arena's flat raw list matches Python's
+                        # raw_segments ordering exactly, and trailing non-code
+                        # tokens (newline, end_of_file, etc.) so that the
+                        # reflow/respace rules can correctly detect EOF and
+                        # trailing newlines.
+                        leading_tokens = (
+                            self._extract_tokens_from_segments(segments[:_start_idx])
+                            if _start_idx
+                            else []
+                        )
+                        trailing_tokens = (
+                            self._extract_tokens_from_segments(segments[_end_idx:])
+                            if _end_idx < len(segments)
+                            else []
+                        )
+                        if _prof is not None:
+                            _ts = time.perf_counter()
+                        result._rs_tree = rs_match.apply_as_tree(
+                            tokens,
+                            leading=leading_tokens,
+                            trailing=trailing_tokens,
+                        )
+                        if _prof is not None:
+                            _prof["apply_as_tree"] = time.perf_counter() - _ts
+                    except Exception:  # pragma: no cover
+                        # Non-critical: if tree building fails, rules fall back
+                        # to Python
+                        parser_logger.warning(
+                            f"Unable to apply match result in parse tree for {fname},"
+                            " falling back to Python. Please report this as a bug"
+                            " with the SQL that caused it."
+                        )
+                        result._rs_tree = None
 
                 # Accumulate this variant's per-stage timings into the profile
                 # (summing across rendered variants of the same source).

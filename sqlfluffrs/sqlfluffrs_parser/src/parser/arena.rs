@@ -120,8 +120,10 @@ impl Arena {
     }
 
     fn next_uuid(&self) -> u128 {
-        // Random v4 uuid, mirroring Python's `uuid4().int` identity semantics.
-        uuid::Uuid::new_v4().as_u128()
+        // Tagged monotonic counter (see `identity::next_arena_id`). Arena
+        // uuids are opaque identity keys, so uniqueness is all that matters;
+        // the previous `Uuid::new_v4()` cost a CSPRNG draw per tree node.
+        sqlfluffrs_types::identity::next_arena_id()
     }
 
     fn alloc(
