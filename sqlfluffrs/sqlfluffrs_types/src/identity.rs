@@ -35,6 +35,22 @@ pub fn next_id() -> u128 {
     RUST_TAG | (COUNTER.fetch_add(1, Ordering::Relaxed) as u128)
 }
 
+/// Source tag for arena (parse tree) node identifiers. Distinct from both the
+/// Python tag (`1 << 120`) and the Rust token tag (`2 << 120`): `4 << 120`
+/// sets bit 123, so arena ids can never collide with either id space.
+const ARENA_TAG: u128 = 4u128 << 120;
+
+static ARENA_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Return a process-unique, source-tagged arena node identifier.
+///
+/// Arena node uuids are opaque identity keys (handle equality/hashing and
+/// `node_by_uuid` lookup); like token ids they were previously random v4
+/// UUIDs, which cost a CSPRNG draw (a `getrandom` call) per parse tree node.
+pub fn next_arena_id() -> u128 {
+    ARENA_TAG | (ARENA_COUNTER.fetch_add(1, Ordering::Relaxed) as u128)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

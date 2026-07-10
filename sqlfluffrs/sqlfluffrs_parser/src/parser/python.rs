@@ -432,6 +432,44 @@ impl PyMatchResult {
     /// strings). Class-name and type strings are interned per call so
     /// repeated names share one Python string object.
     fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        flatten_match_result(py, &self.0)
+    }
+
+    /// Build the mutable arena tree (`RsTree`) from this MatchResult and tokens.
+    ///
+    /// Applies the match result against the provided tokens to construct the
+    /// immutable [`Node`] tree, then ingests it into the id-addressable arena
+    /// that backs the Rust-side segment facade (`RsTree`/`RsHandle`) used by
+    /// linting and (in later milestones) fixing - so per-node navigation never
+    /// round-trips through Python's segment tree. Optionally prepend `leading`
+    /// and append `trailing` non-code tokens to the root.
+    #[pyo3(signature = (tokens, leading=vec![], trailing=vec![]))]
+    fn apply_as_tree(
+        &self,
+        tokens: Vec<PyToken>,
+        leading: Vec<PyToken>,
+        trailing: Vec<PyToken>,
+    ) -> super::arena_py::PyTree {
+        let rust_leading: Vec<Token> = leading.into_iter().map(|t| t.into()).collect();
+        let rust_tokens: Vec<Token> = tokens.into_iter().map(|t| t.into()).collect();
+        let rust_trailing: Vec<Token> = trailing.into_iter().map(|t| t.into()).collect();
+        let node = self
+            .0
+            .clone()
+            .apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
+        super::arena_py::PyTree::new(super::arena::Arena::from_node(&node))
+    }
+}
+
+/// Flatten a match tree into a single pre-order Python list.
+///
+/// Shared by `RsMatchResult.flatten()` and `RsParser.parse_with_ast()`;
+/// see `flatten()`'s docstring for the tuple layout.
+fn flatten_match_result<'py>(
+    py: Python<'py>,
+    root: &MatchResult,
+) -> PyResult<Bound<'py, PyList>> {
+    {
         use pyo3::types::{PyString, PyTuple};
         use sqlfluffrs_types::token::CaseFold;
 
@@ -451,7 +489,7 @@ impl PyMatchResult {
 
         // Pre-order walk with an explicit stack (avoids native recursion
         // limits for deeply nested SQL).
-        let mut stack: Vec<&MatchResult> = vec![&self.0];
+        let mut stack: Vec<&MatchResult> = vec![root];
         let mut ordered_children: Vec<&MatchResult> = Vec::new();
         let mut ordered_inserts: Vec<(usize, u8)> = Vec::new();
         while let Some(m) = stack.pop() {
@@ -553,33 +591,6 @@ impl PyMatchResult {
         }
         Ok(out)
     }
-
-    /// Build the mutable arena tree (`RsTree`) from this MatchResult and tokens.
-    ///
-    /// Applies the match result against the provided tokens to construct the
-    /// immutable [`Node`] tree, then ingests it into the id-addressable arena
-    /// that backs the Rust-side segment façade (`RsTree`/`RsHandle`) used by
-    /// linting and (in later milestones) fixing — so per-node navigation never
-    /// round-trips through Python's segment tree. Optionally prepend `leading`
-    /// and append `trailing` non-code tokens to the root.
-    ///
-    /// This is the single PyO3 entry-point for tree construction.
-    #[pyo3(signature = (tokens, leading=vec![], trailing=vec![]))]
-    fn apply_as_tree(
-        &self,
-        tokens: Vec<PyToken>,
-        leading: Vec<PyToken>,
-        trailing: Vec<PyToken>,
-    ) -> super::arena_py::PyTree {
-        let rust_leading: Vec<Token> = leading.into_iter().map(|t| t.into()).collect();
-        let rust_tokens: Vec<Token> = tokens.into_iter().map(|t| t.into()).collect();
-        let rust_trailing: Vec<Token> = trailing.into_iter().map(|t| t.into()).collect();
-        let node = self
-            .0
-            .clone()
-            .apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
-        super::arena_py::PyTree::new(super::arena::Arena::from_node(&node))
-    }
 }
 
 /// Python-wrapped Parser
@@ -667,6 +678,62 @@ impl PyParser {
         let match_result = parser.call_rule_as_root().map_err(parse_error_to_pyerr)?;
 
         Ok(PyMatchResult(match_result))
+    }
+
+    /// Parse tokens and build everything the native-AST path needs in one call.
+    ///
+    /// Fuses `parse_match_result_from_tokens`, `RsMatchResult.flatten` and
+    /// `RsMatchResult.apply_as_tree` into a single boundary crossing:
+    ///
+    /// * the token list is converted from Python exactly once (the two-call
+    ///   flow converted it once for the parse and again for the tree build),
+    /// * the arena tree is built from the *owned* match result, so the
+    ///   `Arc::try_unwrap` fast path in `apply()` applies and no subtree is
+    ///   deep-cloned (the two-call flow cloned the whole tree because the
+    ///   `RsMatchResult` pyobject kept every child's refcount above 1).
+    ///
+    /// Returns `(flat, tree)` where `flat` is the `flatten()` encoding of the
+    /// match tree and `tree` is the arena tree, or `None` if tree
+    /// construction failed (callers fall back to the Python segment tree,
+    /// matching the previous behaviour where `apply_as_tree` errors were
+    /// non-fatal).
+    #[pyo3(signature = (tokens, leading=vec![], trailing=vec![]))]
+    pub fn parse_with_ast<'py>(
+        &self,
+        py: Python<'py>,
+        tokens: Vec<PyToken>,
+        leading: Vec<PyToken>,
+        trailing: Vec<PyToken>,
+    ) -> PyResult<(Bound<'py, PyList>, Option<super::arena_py::PyTree>)> {
+        // Convert PyToken to internal Token (once).
+        let mut rust_tokens: Vec<Token> = tokens.into_iter().map(|t| t.into()).collect();
+        compute_bracket_pairs(&mut rust_tokens);
+
+        let mut parser = Parser::new_with_max_parse_depth(
+            &rust_tokens,
+            self.dialect,
+            self.indent_config.clone(),
+            self.max_parse_depth,
+        )
+        .with_parser_limits(self.max_parser_iterations, self.parser_warn_threshold)
+        .with_node_limit(self.max_parse_nodes);
+
+        let match_result = parser.call_rule_as_root().map_err(parse_error_to_pyerr)?;
+
+        let flat = flatten_match_result(py, &match_result)?;
+
+        let rust_leading: Vec<Token> = leading.into_iter().map(|t| t.into()).collect();
+        let rust_trailing: Vec<Token> = trailing.into_iter().map(|t| t.into()).collect();
+        // Tree construction panics indicate a malformed match result; they
+        // were non-fatal in the two-call flow (Python caught the resulting
+        // exception and fell back), so keep them non-fatal here too.
+        let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let node = match_result.apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
+            super::arena_py::PyTree::new(super::arena::Arena::from_node(&node))
+        }))
+        .ok();
+
+        Ok((flat, tree))
     }
 
     /// Parse SQL from tokens and return MatchResult along with parser statistics.

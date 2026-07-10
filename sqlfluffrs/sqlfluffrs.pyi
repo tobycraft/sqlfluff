@@ -270,6 +270,12 @@ class RsParser:
     def parse_match_result_from_tokens(
         self, tokens: List[RsToken]
     ) -> RsMatchResult: ...
+    def parse_with_ast(
+        self,
+        tokens: List[RsToken],
+        leading: List[RsToken] = ...,
+        trailing: List[RsToken] = ...,
+    ) -> tuple[List[tuple], Optional["RsTree"]]: ...
 
 def cp01_violations(
     tree: RsTree,
