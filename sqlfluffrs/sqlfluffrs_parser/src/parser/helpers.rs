@@ -480,8 +480,10 @@ impl<'a> Parser<'a> {
         }
 
         // Check if current token is end_of_file type
+        // (compare the Cow directly - get_type() allocates a String and this
+        // runs on every is_terminated check)
         if let Some(tok) = self.peek() {
-            if tok.get_type() == "end_of_file" {
+            if tok.token_type.as_ref() == "end_of_file" {
                 vdebug!("  TERMED Found end_of_file token");
                 self.pos = init_pos;
                 self.metrics

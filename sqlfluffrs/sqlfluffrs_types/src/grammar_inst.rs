@@ -375,6 +375,7 @@ impl fmt::Display for GrammarInst {
 ///
 /// Provides type safety when indexing into GRAMMAR_TABLE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct GrammarId(pub u32);
 
 impl GrammarId {

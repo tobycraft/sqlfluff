@@ -95,10 +95,10 @@ impl Parser<'_> {
         }
 
         // Get element children (excluding exclude grammar if present)
-        let all_children: Vec<GrammarId> = self.grammar_ctx.element_children(grammar_id).collect();
+        let all_children: &[GrammarId] = self.grammar_ctx.element_children_slice(grammar_id);
 
         // Prune options based on simple hints
-        let pruned_children = self.prune_options(&all_children);
+        let pruned_children = self.prune_options(all_children);
 
         // Debug: list kept children names
         #[cfg(feature = "verbose-debug")]

@@ -83,8 +83,8 @@ impl Parser<'_> {
         }
 
         // Get all element children (excludes exclude grammar via element_children)
-        let element_ids: Vec<GrammarId> = self.grammar_ctx.element_children(grammar_id).collect();
-        let pruned_children = self.prune_options(&element_ids);
+        let element_ids: &[GrammarId] = self.grammar_ctx.element_children_slice(grammar_id);
+        let pruned_children = self.prune_options(element_ids);
         #[cfg(feature = "verbose-debug")]
         {
             // Debug element names for easier tracing
@@ -451,8 +451,8 @@ impl Parser<'_> {
         self.pos = ctx.working_idx;
 
         // Re-prune at new position
-        let element_ids: Vec<GrammarId> = self.grammar_ctx.element_children(grammar_id).collect();
-        let repruned_children = self.prune_options(&element_ids);
+        let element_ids: &[GrammarId] = self.grammar_ctx.element_children_slice(grammar_id);
+        let repruned_children = self.prune_options(element_ids);
 
         vdebug!(
             "AnyNumberOf[table]: After match, re-pruned elements from {} to {}",

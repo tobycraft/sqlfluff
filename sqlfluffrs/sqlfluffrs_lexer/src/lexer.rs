@@ -81,13 +81,17 @@ impl BlockTracker {
 }
 
 #[derive(Debug)]
-pub struct TemplateElement {
-    pub raw: String,
+pub struct TemplateElement<'a> {
+    // Borrows from the lexed input and the Lexer's matcher list rather than
+    // owning copies: one raw-String copy and one LexMatcher clone per lexed
+    // element (matchers hold compiled regexes and string tables) dominated
+    // lexing allocations.
+    pub raw: &'a str,
     pub template_slice: Slice, // Slice equivalent
-    pub matcher: LexMatcher,   // Reference to the lexer that matched this element
+    pub matcher: &'a LexMatcher, // The lexer that matched this element
 }
 
-impl Display for TemplateElement {
+impl Display for TemplateElement<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -97,13 +101,13 @@ impl Display for TemplateElement {
     }
 }
 
-impl TemplateElement {
+impl<'a> TemplateElement<'a> {
     // Constructor to create a TemplateElement from a LexedElement and a template slice
-    pub fn from_element(element: &LexedElement, template_slice: Slice) -> Self {
+    pub fn from_element(element: &LexedElement<'a>, template_slice: Slice) -> Self {
         Self {
-            raw: element.raw.to_string(),
+            raw: element.raw,
             template_slice,
-            matcher: element.matcher.clone(),
+            matcher: element.matcher,
         }
     }
 
@@ -269,13 +273,13 @@ impl Lexer {
             .find_map(|matcher| matcher.scan_match(input))
     }
 
-    fn map_template_slices(
+    fn map_template_slices<'a>(
         &self,
-        elements: &[LexedElement],
+        elements: &[LexedElement<'a>],
         template: &TemplatedFile,
-    ) -> Vec<TemplateElement> {
+    ) -> Vec<TemplateElement<'a>> {
         let mut idx = 0;
-        let mut templated_buff = Vec::new();
+        let mut templated_buff = Vec::with_capacity(elements.len());
         // Advance once per element rather than restarting from 0 each time,
         // keeping the validation O(n) in total file size.
         let mut template_chars = template.templated_str.chars();
@@ -285,11 +289,16 @@ impl Lexer {
             let template_slice = Slice::from(idx..idx + element_len);
             idx += element_len;
 
-            let templated_substr: String = template_chars.by_ref().take(element_len).collect();
-            if *templated_substr != *element.raw {
+            // Compare char-by-char without materialising the templated
+            // substring (this used to allocate a String per element).
+            let matches = element
+                .raw
+                .chars()
+                .all(|c| template_chars.next() == Some(c));
+            if !matches {
                 panic!(
-                    "Template and lexed elements do not match. This should never happen  {:?} != {:?}",
-                    &element.raw, &templated_substr
+                    "Template and lexed elements do not match. This should never happen  {:?}",
+                    &element.raw,
                 )
             }
 
