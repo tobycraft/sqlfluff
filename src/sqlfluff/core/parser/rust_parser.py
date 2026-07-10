@@ -265,12 +265,14 @@ try:
                 # is passed, since match-result indices are relative to it.
                 code_segments = segments[_start_idx:_end_idx]
                 if _NATIVE_AST_ENABLED:
-                    # Fused path: instantiate segments directly from rs_match in a
-                    # single pass (no intermediate Python MatchResult tree).
+                    # Fused path: flatten the whole Rust match tree in a single
+                    # PyO3 call, then instantiate segments directly from the
+                    # flat encoding (no intermediate Python MatchResult tree
+                    # and no per-node getter traffic across the boundary).
                     if _prof is not None:
                         _ts = time.perf_counter()
-                    _matched = self._apply_rs_match_result(
-                        rs_match, code_segments, parse_context
+                    _matched = self._apply_flat_match(
+                        rs_match.flatten(), code_segments, parse_context
                     )
                     if _prof is not None:
                         _prof["apply"] = time.perf_counter() - _ts
@@ -644,6 +646,160 @@ try:
             )
             parse_context.increment_parse_nodes()
             return (new_seg,)
+
+        # Maps the insert codes emitted by RsMatchResult.flatten() to meta
+        # segment classes: 0=Indent, 1=ImplicitIndent, 2=Dedent.
+        _META_BY_CODE = (Indent, ImplicitIndent, Dedent)
+
+        def _apply_flat_match(
+            self,
+            flat: list[tuple],
+            segments: tuple["BaseSegment", ...],
+            parse_context: ParseContext,
+        ) -> tuple["BaseSegment", ...]:
+            """Build BaseSegments from a flattened RsMatchResult encoding.
+
+            ``flat`` is the pre-order node list returned by
+            ``RsMatchResult.flatten()`` (see its docstring for the tuple
+            layout). This walks it with a cursor, mirroring
+            ``_apply_rs_match_result`` (and therefore ``MatchResult.apply``)
+            exactly - including parse-node accounting - so it produces an
+            identical tree, while crossing the Python/Rust boundary once for
+            the whole tree rather than several times per node.
+            """
+            cursor = 0
+            get_class = self._get_segment_class_by_name
+            meta_by_code = self._META_BY_CODE
+
+            def build() -> tuple["BaseSegment", ...]:
+                nonlocal cursor
+                (
+                    start,
+                    stop,
+                    class_name,
+                    n_children,
+                    inserts,
+                    instance_types,
+                    trim_chars,
+                    casefold,
+                    expected,
+                    quoted_value,
+                    escape_replacement,
+                ) = flat[cursor]
+                cursor += 1
+
+                result_segments_list: list[BaseSegment] = []
+
+                # Zero-length match: only meta inserts are valid (mirrors
+                # apply()). Any children are structurally impossible here, but
+                # advance the cursor past them defensively to stay aligned.
+                if start == stop:
+                    for _ in range(n_children):  # pragma: no cover
+                        skip_children = flat[cursor][3]
+                        cursor += 1
+                        _pending = skip_children
+                        while _pending:
+                            _pending += flat[cursor][3] - 1
+                            cursor += 1
+                    if inserts:
+                        for idx, code in inserts:
+                            assert idx == start, (
+                                f"Tried to insert @{idx} outside of matched "
+                                f"slice {(start, stop)}"
+                            )
+                            _pos = _get_point_pos_at_idx(segments, idx)
+                            parse_context.increment_parse_nodes()
+                            result_segments_list.append(
+                                meta_by_code[code](pos_marker=_pos)
+                            )
+                    return tuple(result_segments_list)
+
+                max_idx = start
+                ins = inserts or ()
+                ins_i = 0
+                n_ins = len(ins)
+                for _ in range(n_children):
+                    child_start = flat[cursor][0]
+                    # Metas positioned at or before this child come first
+                    # (inserts are added to a trigger location before child
+                    # matches in the reference implementation).
+                    while ins_i < n_ins and ins[ins_i][0] <= child_start:
+                        idx, code = ins[ins_i]
+                        ins_i += 1
+                        if idx > max_idx:
+                            result_segments_list.extend(segments[max_idx:idx])
+                            max_idx = idx
+                        elif idx < max_idx:  # pragma: no cover
+                            raise ValueError(
+                                "Segment skip ahead error. An outer match "
+                                "contains overlapping child matches. This "
+                                "MatchResult was wrongly constructed."
+                            )
+                        _pos = _get_point_pos_at_idx(segments, idx)
+                        result_segments_list.append(meta_by_code[code](pos_marker=_pos))
+                    child_stop = flat[cursor][1]
+                    if child_start > max_idx:
+                        result_segments_list.extend(segments[max_idx:child_start])
+                        max_idx = child_start
+                    elif child_start < max_idx:  # pragma: no cover
+                        raise ValueError(
+                            "Segment skip ahead error. An outer match contains "
+                            "overlapping child matches. This MatchResult was "
+                            "wrongly constructed."
+                        )
+                    result_segments_list.extend(build())
+                    max_idx = child_stop
+                # Any remaining metas after the last child.
+                while ins_i < n_ins:
+                    idx, code = ins[ins_i]
+                    ins_i += 1
+                    if idx > max_idx:
+                        result_segments_list.extend(segments[max_idx:idx])
+                        max_idx = idx
+                    elif idx < max_idx:  # pragma: no cover
+                        raise ValueError(
+                            "Segment skip ahead error. An outer match contains "
+                            "overlapping child matches. This MatchResult was "
+                            "wrongly constructed."
+                        )
+                    _pos = _get_point_pos_at_idx(segments, idx)
+                    result_segments_list.append(meta_by_code[code](pos_marker=_pos))
+
+                # Anything left after the last trigger.
+                if max_idx < stop:
+                    result_segments_list.extend(segments[max_idx:stop])
+
+                result_segments = tuple(result_segments_list)
+
+                if not class_name:
+                    return result_segments
+                matched_class = get_class(class_name)
+                if matched_class is None:  # pragma: no cover
+                    return result_segments
+
+                segment_kwargs: dict[str, Any] = {}
+                if instance_types:
+                    segment_kwargs["instance_types"] = instance_types
+                if expected is not None:
+                    segment_kwargs["expected"] = expected
+                if trim_chars:
+                    segment_kwargs["trim_chars"] = trim_chars
+                if casefold:
+                    segment_kwargs["casefold"] = (
+                        str.upper if casefold == "upper" else str.lower
+                    )
+                if quoted_value:  # pragma: no cover
+                    segment_kwargs["quoted_value"] = quoted_value
+                if escape_replacement:  # pragma: no cover
+                    segment_kwargs["escape_replacements"] = [escape_replacement]
+
+                new_seg = matched_class.from_result_segments(
+                    result_segments, segment_kwargs
+                )
+                parse_context.increment_parse_nodes()
+                return (new_seg,)
+
+            return build()
 
         @staticmethod
         def _template_segment_to_rstoken(segment: TemplateSegment) -> "RsToken":

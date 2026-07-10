@@ -168,6 +168,23 @@ class RsMatchResult:
     escape_replacement: Optional[tuple[str, str]]
     insert_segments: Optional[List[tuple[int, str, bool]]]
 
+    def flatten(
+        self,
+    ) -> List[
+        tuple[
+            int,
+            int,
+            Optional[str],
+            int,
+            Optional[tuple[tuple[int, int], ...]],
+            Optional[tuple[str, ...]],
+            Optional[tuple[str, ...]],
+            Optional[str],
+            Optional[str],
+            Optional[tuple[str, Any]],
+            Optional[tuple[str, str]],
+        ]
+    ]: ...
     def apply_as_tree(
         self,
         tokens: List[RsToken],
