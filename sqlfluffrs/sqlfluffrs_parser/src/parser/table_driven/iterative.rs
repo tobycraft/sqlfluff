@@ -130,6 +130,7 @@ impl Parser<'_> {
             end_pos: None,
             element_key: None,
             parse_mode_override: None, // No override for top-level frame
+            cache_key: None,
         }));
 
         let mut iteration_count = 0_usize;
@@ -718,7 +719,14 @@ impl Parser<'_> {
                 // (shared with the lookup site). `Ok(None)` = not cacheable and `Err` =
                 // max_idx calculation failed; in both cases we simply skip caching (caching
                 // is best-effort and must never fail the parse).
-                if let Ok(Some(cache_key)) = self.frame_cache_key(frame) {
+                // Reuse the key computed at lookup time where available (set
+                // in check_and_handle_table_frame_cache); frames that never
+                // went through a cache lookup derive it here.
+                let cache_key = match frame.cache_key {
+                    Some(key) => Some(key),
+                    None => self.frame_cache_key(frame).unwrap_or(None),
+                };
+                if let Some(cache_key) = cache_key {
                     // Cache as Arc<MatchResult> (cheap to clone later)
                     self.table_cache
                         .put(cache_key, (Arc::clone(match_result), end_pos));
@@ -835,7 +843,7 @@ impl Parser<'_> {
     /// - FrameResult::Push(frame): Cache miss, push frame back to process normally
     fn check_and_handle_table_frame_cache(
         &mut self,
-        frame: Box<TableParseFrame>,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         if self.cache_enabled {
@@ -843,6 +851,7 @@ impl Parser<'_> {
             // (shared with the store site in commit_table_frame_result, so the keys cannot
             // drift). `None` means this grammar isn't cached.
             if let Some(cache_key) = self.frame_cache_key(&frame)? {
+                frame.cache_key = Some(cache_key);
                 if let Some((match_result, end_pos)) = self.table_cache.get(&cache_key) {
                     vdebug!(
                         "[LOOP] TableCache HIT for grammar {} at pos {} -> end_pos {} (frame_id={})",

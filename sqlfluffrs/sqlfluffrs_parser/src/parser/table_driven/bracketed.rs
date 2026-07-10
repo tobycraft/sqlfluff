@@ -695,5 +695,6 @@ fn create_child_frame(
         end_pos: None,
         element_key: None,
         parse_mode_override, // Propagate parse mode override!
+        cache_key: None,
     })
 }

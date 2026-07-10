@@ -331,6 +331,11 @@ pub struct TableParseFrame {
     /// This matches Python behavior where Bracketed(parse_mode=GREEDY) inherits from Sequence
     /// and passes its parse_mode to all content elements.
     pub parse_mode_override: Option<ParseMode>,
+    /// The frame cache key computed at cache-lookup time (Initial state),
+    /// reused verbatim when the result is committed so the store key can
+    /// never drift from the lookup key - and so the key derivation (mode
+    /// checks + max_idx calculation) runs once per frame instead of twice.
+    pub cache_key: Option<crate::parser::cache::TableCacheKey>,
 }
 
 impl TableParseFrame {
@@ -354,6 +359,7 @@ impl TableParseFrame {
             end_pos: None,
             element_key: None,
             parse_mode_override: None,
+            cache_key: None,
         })
     }
 
