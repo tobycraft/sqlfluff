@@ -631,26 +631,6 @@ impl<'a> Parser<'a> {
         let template = tables.get_string(template_id);
         let token_type = tables.get_string(token_type_id);
         let raw_class = tables.get_string(raw_class_id);
-        let (configured_instance_type_ids, raw_class_class_type_ids) = if aux_end >= aux_start + 4 {
-            let inst_count = tables.aux_data[aux_start + 3] as usize;
-            let inst_start = aux_start + 4;
-            let inst_end = inst_start.saturating_add(inst_count);
-            let inst_ids = if inst_end <= aux_end {
-                tables.aux_data[inst_start..inst_end]
-                    .iter()
-                    .copied()
-                    .filter(|id| *id != 0xFFFFFFFF)
-                    .collect::<Vec<_>>()
-            } else {
-                vec![token_type_id]
-            };
-            let ct_ids = read_string_ids_from_aux(tables, inst_end, aux_end);
-            (inst_ids, ct_ids)
-        } else {
-            (vec![token_type_id], vec![])
-        };
-        let casefold = self.grammar_ctx.casefold(grammar_id);
-        let grammar_trim_chars = self.grammar_ctx.trim_chars(grammar_id);
 
         self.pos = frame.pos;
 
@@ -665,6 +645,31 @@ impl<'a> Parser<'a> {
             Some(tok) if tok.is_type(&[&template]) => {
                 // Capture all token-derived data before mutating self
                 let token_pos = self.pos;
+                // NOTE: Only built after the token comparison succeeds -
+                // TypedParser runs for many failing candidates per position,
+                // and building these vectors up front cost two allocations
+                // per failed attempt.
+                let (configured_instance_type_ids, raw_class_class_type_ids) =
+                    if aux_end >= aux_start + 4 {
+                        let inst_count = tables.aux_data[aux_start + 3] as usize;
+                        let inst_start = aux_start + 4;
+                        let inst_end = inst_start.saturating_add(inst_count);
+                        let inst_ids = if inst_end <= aux_end {
+                            tables.aux_data[inst_start..inst_end]
+                                .iter()
+                                .copied()
+                                .filter(|id| *id != 0xFFFFFFFF)
+                                .collect::<Vec<_>>()
+                        } else {
+                            vec![token_type_id]
+                        };
+                        let ct_ids = read_string_ids_from_aux(tables, inst_end, aux_end);
+                        (inst_ids, ct_ids)
+                    } else {
+                        (vec![token_type_id], vec![])
+                    };
+                let casefold = self.grammar_ctx.casefold(grammar_id);
+                let grammar_trim_chars = self.grammar_ctx.trim_chars(grammar_id);
                 #[cfg(feature = "verbose-debug")]
                 {
                     let raw = tok.raw().to_owned();
