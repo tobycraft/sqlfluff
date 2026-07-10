@@ -392,6 +392,7 @@ impl<'a> Parser<'a> {
         // Python's `if _start_idx == _end_idx: return cls(segments, fname=fname)`.
         if first_code_pos >= last_code_pos {
             let file_mr = MatchResult {
+                node_count_cache: Default::default(),
                 matched_slice: 0..self.tokens.len(),
                 matched_class: Some(MatchedClass::root()),
                 insert_segments: vec![],
@@ -450,6 +451,7 @@ impl<'a> Parser<'a> {
             // A wrapper (no segment class) that holds both the matched result and
             // the unparsable tail; gap-fill handles non-code between them.
             Arc::new(MatchResult {
+                node_count_cache: Default::default(),
                 matched_slice: first_code_pos..last_code_pos,
                 matched_class: None,
                 insert_segments: vec![],
@@ -464,6 +466,7 @@ impl<'a> Parser<'a> {
         // trailing non-code are gap-filled, mirroring Python's
         // `cls(segments[:_start_idx] + content + segments[_end_idx:], fname=fname)`.
         let file_mr = MatchResult {
+            node_count_cache: Default::default(),
             matched_slice: 0..token_slice_orig.len(),
             matched_class: Some(MatchedClass::root()),
             insert_segments: vec![],

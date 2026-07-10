@@ -128,20 +128,43 @@ class PositionMarker:
     def from_child_markers(
         cls, markers: Sequence[Optional["PositionMarker"]]
     ) -> "PositionMarker":
-        """Create a parent marker from it's children."""
-        source_slice = slice(
-            min(m.source_slice.start for m in markers if m),
-            max(m.source_slice.stop for m in markers if m),
+        """Create a parent marker from it's children.
+
+        NOTE: This runs once per constructed segment (i.e. per parse tree
+        node), so it's deliberately a single pass over the child markers
+        rather than four generator sweeps plus a set build.
+        """
+        src_start = src_stop = tmpl_start = tmpl_stop = None
+        templated_file = None
+        for m in markers:
+            if not m:
+                continue
+            ss = m.source_slice
+            ts = m.templated_slice
+            if src_start is None:
+                src_start, src_stop = ss.start, ss.stop
+                tmpl_start, tmpl_stop = ts.start, ts.stop
+                templated_file = m.templated_file
+            else:
+                if ss.start < src_start:
+                    src_start = ss.start
+                if ss.stop > src_stop:
+                    src_stop = ss.stop
+                if ts.start < tmpl_start:
+                    tmpl_start = ts.start
+                if ts.stop > tmpl_stop:
+                    tmpl_stop = ts.stop
+                if m.templated_file is not templated_file:  # pragma: no cover
+                    raise ValueError(
+                        "Attempted to make a parent marker from multiple files."
+                    )
+        if templated_file is None:  # pragma: no cover
+            raise ValueError("Attempted to make a parent marker from no markers.")
+        return cls(
+            slice(src_start, src_stop),
+            slice(tmpl_start, tmpl_stop),
+            templated_file,
         )
-        templated_slice = slice(
-            min(m.templated_slice.start for m in markers if m),
-            max(m.templated_slice.stop for m in markers if m),
-        )
-        templated_files = {m.templated_file for m in markers if m}
-        if len(templated_files) != 1:  # pragma: no cover
-            raise ValueError("Attempted to make a parent marker from multiple files.")
-        templated_file = templated_files.pop()
-        return cls(source_slice, templated_slice, templated_file)
 
     def source_position(self) -> tuple[int, int]:
         """Return the line and position of this marker in the source."""
