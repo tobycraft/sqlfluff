@@ -334,6 +334,31 @@ class RawSegment(BaseSegment):
         """Create a RawSegment from result segments."""
         assert len(result_segments) == 1
         raw_seg = cast("RawSegment", result_segments[0])
+        # Fast path: for classes using the default __init__, and kwargs that
+        # don't change how the raw value is normalized, populate the instance
+        # dict directly (mirroring __init__ field for field) and reuse the
+        # source segment's computed _raw_upper/_raw_value. This runs once per
+        # parser-typed token (e.g. every keyword), so it's hot.
+        if cls.__init__ is RawSegment.__init__ and not (
+            "quoted_value" in segment_kwargs or "escape_replacements" in segment_kwargs
+        ):
+            seg = cls.__new__(cls)
+            d = seg.__dict__
+            sd = raw_seg.__dict__
+            d["pos_marker"] = sd["pos_marker"]
+            d["_raw"] = sd["_raw"]
+            d["_raw_upper"] = sd["_raw_upper"]
+            d["segments"] = ()
+            d["instance_types"] = segment_kwargs.get("instance_types", ())
+            d["trim_start"] = None
+            d["trim_chars"] = segment_kwargs.get("trim_chars")
+            d["_source_fixes"] = None
+            d["uuid"] = get_next_id()
+            d["quoted_value"] = sd["quoted_value"]
+            d["escape_replacements"] = sd["escape_replacements"]
+            d["casefold"] = segment_kwargs.get("casefold", sd["casefold"])
+            d["_raw_value"] = sd["_raw_value"]
+            return seg
         new_segment_kwargs = raw_seg._get_raw_segment_kwargs()
         new_segment_kwargs.update(segment_kwargs)
         return cls(

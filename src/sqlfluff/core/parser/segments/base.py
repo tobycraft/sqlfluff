@@ -211,10 +211,10 @@ class BaseSegment(metaclass=SegmentMetaclass):
 
         if not pos_marker:
             # If no pos given, work it out from the children.
-            if all(seg.pos_marker for seg in segments):
-                pos_marker = PositionMarker.from_child_markers(
-                    [seg.pos_marker for seg in segments]
-                )
+            # (Single pass: collect the markers once, then check them.)
+            markers = [seg.pos_marker for seg in segments]
+            if all(markers):
+                pos_marker = PositionMarker.from_child_markers(markers)
 
         assert not hasattr(self, "parse_grammar"), "parse_grammar is deprecated."
 
@@ -756,13 +756,16 @@ class BaseSegment(metaclass=SegmentMetaclass):
 
     def set_as_parent(self, recurse: bool = True) -> None:
         """Set this segment as parent for child all segments."""
-        # NOTE: One weakref for all children (CPython caches and reuses the
-        # callback-less weakref per referent, but the constructor call per
-        # child still costs). This runs on every segment construction.
+        # NOTE: This runs on every segment construction, for every child, so
+        # it's deliberately lean: one weakref for all children, and direct
+        # instance-dict writes rather than attribute assignment (attribute
+        # assignment routes through the Python-level __setattr__ overrides,
+        # whose cache-invalidation logic doesn't apply to these two keys).
         ref = weakref.ref(self)
         for idx, seg in enumerate(self.segments):
-            seg._parent = ref
-            seg._parent_idx = idx
+            d = seg.__dict__
+            d["_parent"] = ref
+            d["_parent_idx"] = idx
             # Recurse if not disabled
             if recurse:
                 seg.set_as_parent(recurse=recurse)
