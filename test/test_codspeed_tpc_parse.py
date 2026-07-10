@@ -1,8 +1,12 @@
 """CodSpeed benchmark: parse the TPC-H/TPC-DS query suites via the Rust parser.
 
-Two benchmarks are exposed to pytest-codspeed: `test_parse_tpch` and
-`test_parse_tpcds`, each parsing the full query suite once per benchmark
-iteration through `Linter.parse_string` with `use_rust_parser` enabled.
+Four benchmarks are exposed to pytest-codspeed, each parsing the full query
+suite once per benchmark iteration through `Linter.parse_string` with
+`use_rust_parser` enabled. `test_parse_tpch` and `test_parse_tpcds` use the
+default (legacy) tree-building path; `test_native_ast_tpch` and
+`test_native_ast_tpcds` run the same thing with the native AST path enabled
+(`set_native_ast` / the SQLFLUFF_RS_NATIVE_AST env var), which builds the
+BaseSegment tree in a single fused pass over the Rust match result.
 
 Run instrumented (as CI does):
     pytest test/test_codspeed_tpc_parse.py --codspeed
@@ -14,12 +18,14 @@ wrapped function once when not run under `--codspeed`):
 
 import pathlib
 import urllib.request
+from collections.abc import Iterator
 from urllib.error import URLError
 
 import pytest
 
 from sqlfluff.core import Linter
 from sqlfluff.core.config import FluffConfig
+from sqlfluff.core.parser import rust_parser
 
 # TPC-H/TPC-DS query fixtures, mirroring sqlfluffrs_benchmarks/build.rs so the
 # query text matches the Rust criterion benches (tpc_bench.rs) exactly. Not
@@ -104,6 +110,15 @@ def rust_linter() -> Linter:
     return Linter(config=cfg)
 
 
+@pytest.fixture
+def native_ast_enabled() -> Iterator[None]:
+    """Enable the native AST path for the duration of a test."""
+    previous = rust_parser._NATIVE_AST_ENABLED
+    rust_parser.set_native_ast(True)
+    yield
+    rust_parser.set_native_ast(previous)
+
+
 @pytest.fixture(scope="session")
 def tpch_queries() -> list[str]:
     """Return the cached TPC-H query fixtures, fetching them if needed."""
@@ -131,6 +146,34 @@ def test_parse_tpch(benchmark, rust_linter: Linter, tpch_queries: list[str]) -> 
 
 def test_parse_tpcds(benchmark, rust_linter: Linter, tpcds_queries: list[str]) -> None:
     """Benchmark parsing the TPC-DS query set with the Rust parser."""
+
+    @benchmark
+    def _run() -> None:
+        for sql in tpcds_queries:
+            rust_linter.parse_string(sql)
+
+
+def test_native_ast_tpch(
+    benchmark,
+    rust_linter: Linter,
+    tpch_queries: list[str],
+    native_ast_enabled: None,
+) -> None:
+    """Benchmark parsing the TPC-H query set with the native AST path."""
+
+    @benchmark
+    def _run() -> None:
+        for sql in tpch_queries:
+            rust_linter.parse_string(sql)
+
+
+def test_native_ast_tpcds(
+    benchmark,
+    rust_linter: Linter,
+    tpcds_queries: list[str],
+    native_ast_enabled: None,
+) -> None:
+    """Benchmark parsing the TPC-DS query set with the native AST path."""
 
     @benchmark
     def _run() -> None:
