@@ -122,9 +122,19 @@ pub struct MatchResult {
     pub node_count_cache: NodeCountCache,
 }
 
-/// Once-cell cache for [`MatchResult::node_count`] that resets on clone.
-#[derive(Debug, Default)]
-pub struct NodeCountCache(std::sync::OnceLock<usize>);
+/// Cache for [`MatchResult::node_count`] that resets on clone.
+///
+/// A relaxed atomic with `usize::MAX` as the "unset" sentinel: cheaper on
+/// the hot path than a `OnceLock` (plain load, no once-state machinery),
+/// and counts are deterministic so a racing double-computation is benign.
+#[derive(Debug)]
+pub struct NodeCountCache(std::sync::atomic::AtomicUsize);
+
+impl Default for NodeCountCache {
+    fn default() -> Self {
+        Self(std::sync::atomic::AtomicUsize::new(usize::MAX))
+    }
+}
 
 impl Clone for NodeCountCache {
     fn clone(&self) -> Self {
@@ -343,15 +353,20 @@ impl MatchResult {
     /// calls this on every frame commit, so an uncached walk made the limit
     /// check quadratic in tree depth.
     pub fn node_count(&self) -> usize {
-        *self.node_count_cache.0.get_or_init(|| {
-            usize::from(self.matched_class.is_some())
-                + self.insert_segments.len()
-                + self
-                    .child_matches
-                    .iter()
-                    .map(|child| child.node_count())
-                    .sum::<usize>()
-        })
+        use std::sync::atomic::Ordering;
+        let cached = self.node_count_cache.0.load(Ordering::Relaxed);
+        if cached != usize::MAX {
+            return cached;
+        }
+        let count = usize::from(self.matched_class.is_some())
+            + self.insert_segments.len()
+            + self
+                .child_matches
+                .iter()
+                .map(|child| child.node_count())
+                .sum::<usize>();
+        self.node_count_cache.0.store(count, Ordering::Relaxed);
+        count
     }
 
     /// Combine another sequential match onto this one.
