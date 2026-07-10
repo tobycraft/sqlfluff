@@ -417,6 +417,143 @@ impl PyMatchResult {
         )
     }
 
+    /// Flatten the whole match tree into a single pre-order Python list.
+    ///
+    /// Each node becomes one 11-tuple:
+    /// `(start, stop, class_name, n_children, inserts, instance_types,
+    ///   trim_chars, casefold, expected, quoted_value, escape_replacement)`
+    /// where `inserts` is `None` or a tuple of `(idx, code)` pairs with
+    /// code 0=Indent, 1=ImplicitIndent, 2=Dedent, and the string-valued
+    /// fields are `None` when unset.
+    ///
+    /// This exists so the Python-side native AST builder can walk the tree
+    /// with a single Rust call instead of ~10 attribute getters per node
+    /// (each of which allocates fresh Python objects and re-clones Rust
+    /// strings). Class-name and type strings are interned per call so
+    /// repeated names share one Python string object.
+    fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        use pyo3::types::{PyString, PyTuple};
+        use sqlfluffrs_types::token::CaseFold;
+
+        let out = PyList::empty(py);
+        let mut interned: HashMap<&str, Py<PyString>> = HashMap::new();
+
+        fn intern<'a, 'py>(
+            py: Python<'py>,
+            interned: &mut HashMap<&'a str, Py<PyString>>,
+            s: &'a str,
+        ) -> Py<PyString> {
+            interned
+                .entry(s)
+                .or_insert_with(|| PyString::new(py, s).unbind())
+                .clone_ref(py)
+        }
+
+        // Pre-order walk with an explicit stack (avoids native recursion
+        // limits for deeply nested SQL).
+        let mut stack: Vec<&MatchResult> = vec![&self.0];
+        let mut ordered_children: Vec<&MatchResult> = Vec::new();
+        let mut ordered_inserts: Vec<(usize, u8)> = Vec::new();
+        while let Some(m) = stack.pop() {
+            // The Python reference walk (`_apply_rs_match_result`) processes
+            // trigger locations position-sorted, so emit children (and
+            // inserts, below) stably sorted by position. In practice they're
+            // already ordered, making the sorts near-free.
+            ordered_children.clear();
+            ordered_children.extend(m.child_matches.iter().map(|c| &**c));
+            ordered_children.sort_by_key(|c| c.matched_slice.start);
+            // Children are pushed in reverse so they pop in source order.
+            for child in ordered_children.iter().rev() {
+                stack.push(child);
+            }
+
+            let (class_name, instance_types, trim_chars, casefold, expected, quoted, escape) =
+                match m.matched_class.as_ref() {
+                    Some(mc) => {
+                        let sk = &mc.segment_kwargs;
+                        let instance_types = sk.instance_types.as_ref().map(|v| {
+                            PyTuple::new(
+                                py,
+                                v.iter().map(|s| intern(py, &mut interned, s.as_str())),
+                            )
+                            .unwrap()
+                        });
+                        let trim_chars = sk.trim_chars.as_ref().map(|v| {
+                            PyTuple::new(
+                                py,
+                                v.iter().map(|s| intern(py, &mut interned, s.as_str())),
+                            )
+                            .unwrap()
+                        });
+                        let casefold = match sk.casefold {
+                            CaseFold::None => None,
+                            CaseFold::Upper => Some(intern(py, &mut interned, "upper")),
+                            CaseFold::Lower => Some(intern(py, &mut interned, "lower")),
+                        };
+                        let expected = sk.parse_error.as_ref().map(|(msg, _)| msg.as_str());
+                        let quoted = sk.quoted_value.as_ref().map(|(pattern, group)| {
+                            let py_group: Py<PyAny> = match group {
+                                sqlfluffrs_types::regex::RegexModeGroup::Index(idx) => {
+                                    idx.into_pyobject(py).unwrap().unbind().into()
+                                }
+                                sqlfluffrs_types::regex::RegexModeGroup::Name(name) => {
+                                    PyString::new(py, name).unbind().into()
+                                }
+                            };
+                            (pattern.as_str(), py_group)
+                        });
+                        let escape = sk
+                            .escape_replacement
+                            .as_ref()
+                            .map(|(a, b)| (a.as_str(), b.as_str()));
+                        (
+                            Some(intern(py, &mut interned, mc.class_name.as_ref())),
+                            instance_types,
+                            trim_chars,
+                            casefold,
+                            expected,
+                            quoted,
+                            escape,
+                        )
+                    }
+                    None => (None, None, None, None, None, None, None),
+                };
+
+            let inserts = if m.insert_segments.is_empty() {
+                None
+            } else {
+                ordered_inserts.clear();
+                ordered_inserts.extend(m.insert_segments.iter().map(|(idx, seg_type)| {
+                    let code: u8 = match seg_type {
+                        MetaSegment::Indent { is_implicit: false } => 0,
+                        MetaSegment::Indent { is_implicit: true } => 1,
+                        MetaSegment::Dedent { .. } => 2,
+                    };
+                    (*idx, code)
+                }));
+                ordered_inserts.sort_by_key(|(idx, _)| *idx);
+                Some(PyTuple::new(py, ordered_inserts.iter().copied()).unwrap())
+            };
+
+            let node = (
+                m.matched_slice.start,
+                m.matched_slice.end,
+                class_name,
+                m.child_matches.len(),
+                inserts,
+                instance_types,
+                trim_chars,
+                casefold,
+                expected,
+                quoted,
+                escape,
+            )
+                .into_pyobject(py)?;
+            out.append(node)?;
+        }
+        Ok(out)
+    }
+
     /// Build the mutable arena tree (`RsTree`) from this MatchResult and tokens.
     ///
     /// Applies the match result against the provided tokens to construct the
