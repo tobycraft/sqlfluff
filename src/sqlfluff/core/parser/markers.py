@@ -4,7 +4,6 @@ This class is a construct to keep track of positions within a file.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 from sqlfluff.core.helpers.slice import zero_slice
@@ -14,7 +13,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from sqlfluffrs import RsPositionMarker
 
 
-@dataclass(frozen=True)
 class PositionMarker:
     """A reference to a position in a file.
 
@@ -29,25 +27,75 @@ class PositionMarker:
         - Positions within the fixed file are identified with a line number and line
           position, which identify a point.
         - Arithmetic comparisons are on the location in the fixed file.
+
+    NOTE: This was previously a frozen dataclass, but it's instantiated once
+    per parse-tree node (and per raw token), which made the generated
+    ``object.__setattr__``-based ``__init__`` a parsing hotspot. It's now a
+    plain ``__slots__`` class with the same field order, ``repr``, equality,
+    ordering and hashing behaviour. Instances must still be treated as
+    immutable - use methods like ``with_working_position`` to derive new
+    markers rather than assigning to attributes.
     """
+
+    __slots__ = (
+        "source_slice",
+        "templated_slice",
+        "templated_file",
+        "working_line_no",
+        "working_line_pos",
+    )
 
     source_slice: slice
     templated_slice: slice
     templated_file: "TemplatedFile"
-    # If not set, these will be initialised in the post init.
-    working_line_no: int = -1
-    working_line_pos: int = -1
+    working_line_no: int
+    working_line_pos: int
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        source_slice: slice,
+        templated_slice: slice,
+        templated_file: "TemplatedFile",
+        working_line_no: int = -1,
+        working_line_pos: int = -1,
+    ) -> None:
+        self.source_slice = source_slice
+        self.templated_slice = templated_slice
+        self.templated_file = templated_file
         # If the working position has not been explicitly set
         # then infer it from the position in the templated file.
         # This is accurate up until the point that any fixes have
         # been applied.
-        if self.working_line_no == -1 or self.working_line_pos == -1:
-            line_no, line_pos = self.templated_position()
-            # Use the base method because we're working with a frozen class
-            object.__setattr__(self, "working_line_no", line_no)
-            object.__setattr__(self, "working_line_pos", line_pos)
+        if working_line_no == -1 or working_line_pos == -1:
+            working_line_no, working_line_pos = (
+                templated_file.get_line_pos_of_char_pos(
+                    templated_slice.start, source=False
+                )
+            )
+        self.working_line_no = working_line_no
+        self.working_line_pos = working_line_pos
+
+    def __repr__(self) -> str:
+        # Matches the previous dataclass-generated repr.
+        return (
+            f"PositionMarker(source_slice={self.source_slice!r}, "
+            f"templated_slice={self.templated_slice!r}, "
+            f"templated_file={self.templated_file!r}, "
+            f"working_line_no={self.working_line_no!r}, "
+            f"working_line_pos={self.working_line_pos!r})"
+        )
+
+    def __hash__(self) -> int:
+        # Matches the previous dataclass-generated field-tuple hash.
+        return hash(
+            (
+                self.source_slice,
+                self.templated_slice,
+                self.templated_file,
+                self.working_line_no,
+                self.working_line_pos,
+            )
+        )
 
     def __str__(self) -> str:
         return self.to_source_string()
