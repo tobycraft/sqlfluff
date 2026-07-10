@@ -49,7 +49,7 @@ use crate::vdebug;
 /// key (their effect rides in via max_idx). GREEDY-family frames, which trim on
 /// *inherited* terminators internally, are simply not cached (see
 /// `frame_cache_key`), so the key is always sufficient.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TableCacheKey {
     pub pos: usize,
     pub grammar_id: u32,
