@@ -12,12 +12,12 @@ pub enum TableFrameResult {
     /// Frame processing is complete, don't push back
     Done,
     /// Frame needs to be pushed back with updated state
-    Push(TableParseFrame),
+    Push(Box<TableParseFrame>),
 }
 
 /// Stack structure for managing ParseFrames and related state
 pub struct TableParseFrameStack {
-    stack: Vec<TableParseFrame>,
+    stack: Vec<Box<TableParseFrame>>,
     /// Single pending result slot: `(frame_id, result, end_pos, element_key)`.
     ///
     /// At most one child result is in-flight at any time because the stack
@@ -64,11 +64,11 @@ impl TableParseFrameStack {
         self.results.is_some()
     }
 
-    pub fn push(&mut self, frame: TableParseFrame) {
+    pub fn push(&mut self, frame: Box<TableParseFrame>) {
         self.stack.push(frame);
     }
 
-    pub fn pop(&mut self) -> Option<TableParseFrame> {
+    pub fn pop(&mut self) -> Option<Box<TableParseFrame>> {
         self.stack.pop()
     }
 
@@ -81,10 +81,10 @@ impl TableParseFrameStack {
     }
 
     pub fn last_mut(&mut self) -> Option<&mut TableParseFrame> {
-        self.stack.last_mut()
+        self.stack.last_mut().map(|b| b.as_mut())
     }
 
-    pub fn iter(&'_ self) -> std::slice::Iter<'_, TableParseFrame> {
+    pub fn iter(&'_ self) -> std::slice::Iter<'_, Box<TableParseFrame>> {
         self.stack.iter()
     }
 
@@ -136,8 +136,8 @@ impl TableParseFrameStack {
     #[inline]
     pub(crate) fn push_child_and_wait(
         &mut self,
-        mut parent: TableParseFrame,
-        child: TableParseFrame,
+        mut parent: Box<TableParseFrame>,
+        child: Box<TableParseFrame>,
         child_index: usize,
     ) -> TableFrameResult {
         parent.state = FrameState::WaitingForChild { child_index };
@@ -150,7 +150,7 @@ impl TableParseFrameStack {
     #[inline]
     pub(crate) fn transition_to_combining(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         end_pos: Option<usize>,
     ) -> TableFrameResult {
         frame.transition_to_combining(end_pos);
@@ -162,7 +162,7 @@ impl TableParseFrameStack {
     #[inline]
     pub(crate) fn complete_frame(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         result: Arc<MatchResult>,
     ) -> TableFrameResult {
         let pos = result.end();
@@ -211,8 +211,8 @@ impl TableParseFrameStack {
     /// Returns the new frame_id_counter value
     pub fn push_child_and_update_parent(
         &mut self,
-        mut parent_frame: TableParseFrame,
-        child_frame: TableParseFrame,
+        mut parent_frame: Box<TableParseFrame>,
+        child_frame: Box<TableParseFrame>,
         parent_context_type: GrammarVariant,
     ) {
         let child_id = child_frame.frame_id;
@@ -231,8 +231,8 @@ impl TableParseFrameStack {
     /// Specialized version for Sequence that also updates current_element_idx
     pub fn push_sequence_child_and_update_parent(
         &mut self,
-        mut parent_frame: TableParseFrame,
-        child_frame: TableParseFrame,
+        mut parent_frame: Box<TableParseFrame>,
+        child_frame: Box<TableParseFrame>,
         next_element_idx: usize,
     ) {
         let child_id = child_frame.frame_id;
@@ -257,7 +257,7 @@ impl TableParseFrameStack {
     /// Assumes parent is already on the stack
     pub fn update_sequence_parent_and_push_child(
         &mut self,
-        child_frame: TableParseFrame,
+        child_frame: Box<TableParseFrame>,
         next_element_idx: usize,
     ) -> TableFrameResult {
         let child_id = child_frame.frame_id;
@@ -336,8 +336,8 @@ impl TableParseFrame {
         pos: usize,
         table_terminators: &[GrammarId],
         parent_max_idx: Option<usize>,
-    ) -> Self {
-        TableParseFrame {
+    ) -> Box<Self> {
+        Box::new(TableParseFrame {
             frame_id,
             grammar_id,
             pos,
@@ -349,7 +349,7 @@ impl TableParseFrame {
             end_pos: None,
             element_key: None,
             parse_mode_override: None,
-        }
+        })
     }
 
     fn transition_to_combining(&mut self, end_pos: Option<usize>) {

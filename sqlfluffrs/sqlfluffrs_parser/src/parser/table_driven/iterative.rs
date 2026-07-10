@@ -118,7 +118,7 @@ impl Parser<'_> {
         let mut stack = TableParseFrameStack::new();
         let initial_frame_id = stack.frame_id_counter;
         stack.frame_id_counter += 1;
-        stack.push(TableParseFrame {
+        stack.push(Box::new(TableParseFrame {
             frame_id: initial_frame_id,
             grammar_id: grammar,
             pos: self.pos,
@@ -130,7 +130,7 @@ impl Parser<'_> {
             end_pos: None,
             element_key: None,
             parse_mode_override: None, // No override for top-level frame
-        });
+        }));
 
         let mut iteration_count = 0_usize;
         let max_iterations = self.max_parser_iterations;
@@ -365,7 +365,7 @@ impl Parser<'_> {
     /// Dispatch handler for table-driven Initial state.
     pub fn handle_initial(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
         _iteration_count: usize,
     ) -> Result<TableFrameResult, ParseError> {
@@ -464,7 +464,7 @@ impl Parser<'_> {
     /// Dispatch handler for WaitingForChild state.
     fn handle_waiting_for_child(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
         iteration_count: usize,
     ) -> Result<TableFrameResult, ParseError> {
@@ -630,7 +630,7 @@ impl Parser<'_> {
 
     fn handle_combining(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         use sqlfluffrs_types::GrammarVariant;
@@ -835,7 +835,7 @@ impl Parser<'_> {
     /// - FrameResult::Push(frame): Cache miss, push frame back to process normally
     fn check_and_handle_table_frame_cache(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         if self.cache_enabled {

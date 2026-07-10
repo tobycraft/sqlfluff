@@ -13,7 +13,7 @@ use crate::parser::{
 impl Parser<'_> {
     pub(crate) fn handle_bracketed_initial(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let grammar_id = frame.grammar_id;
@@ -73,7 +73,7 @@ impl Parser<'_> {
     /// Handle Bracketed WaitingForChild state using table-driven approach
     pub(crate) fn handle_bracketed_waiting_for_child(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -113,7 +113,7 @@ impl Parser<'_> {
     /// push the first content element (or skip straight to the closing bracket).
     fn handle_bracketed_open_result(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -291,7 +291,7 @@ impl Parser<'_> {
     /// the closing bracket (inserting an unparsable section in GREEDY mode).
     fn handle_bracketed_content_result(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -506,7 +506,7 @@ impl Parser<'_> {
     /// per parse mode when the bracket is missing.
     fn handle_bracketed_close_result(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -584,7 +584,7 @@ impl Parser<'_> {
     /// Builds the final Bracketed node and transitions to Complete state.
     pub(crate) fn handle_bracketed_combining(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         // Extract the bracketed state and grammar from the frame context
@@ -649,7 +649,7 @@ impl Parser<'_> {
 
 fn initialize_bracketed_frame(
     grammar_id: GrammarId,
-    mut frame: TableParseFrame,
+    mut frame: Box<TableParseFrame>,
     stack: &mut TableParseFrameStack,
     all_terminators: &[GrammarId],
 ) {
@@ -677,8 +677,8 @@ fn create_child_frame(
     context: FrameContext,
     parent_max_idx: Option<usize>,
     parse_mode_override: Option<ParseMode>,
-) -> TableParseFrame {
-    TableParseFrame {
+) -> Box<TableParseFrame> {
+    Box::new(TableParseFrame {
         frame_id,
         grammar_id,
         pos: start_idx,
@@ -690,5 +690,5 @@ fn create_child_frame(
         end_pos: None,
         element_key: None,
         parse_mode_override, // Propagate parse mode override!
-    }
+    })
 }
