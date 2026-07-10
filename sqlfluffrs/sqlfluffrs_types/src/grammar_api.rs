@@ -571,6 +571,25 @@ impl<'a> GrammarContext<'a> {
             .map(|&id| GrammarId::new(id))
     }
 
+    /// Like [`Self::element_children`], but returns the backing table slice
+    /// directly - no per-call `Vec` allocation. `GrammarId` is
+    /// `#[repr(transparent)]` over `u32`, so the cast is layout-safe.
+    #[inline]
+    pub fn element_children_slice(&self, id: GrammarId) -> &'a [GrammarId] {
+        let inst = self.inst(id);
+        let start = inst.first_child_idx as usize;
+        let count = if inst.flags.has_exclude() {
+            // Exclude is last child, so element count is child_count - 1
+            inst.child_count - 1
+        } else {
+            inst.child_count
+        } as usize;
+        let ids: &'a [u32] = &self.tables.child_ids[start..start + count];
+        // SAFETY: GrammarId is #[repr(transparent)] over u32, so &[u32] and
+        // &[GrammarId] have identical layout.
+        unsafe { std::slice::from_raw_parts(ids.as_ptr() as *const GrammarId, ids.len()) }
+    }
+
     /// Access underlying tables (for advanced use)
     #[inline]
     pub fn tables(&self) -> &'a GrammarTables {
