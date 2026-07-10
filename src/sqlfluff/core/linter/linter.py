@@ -313,7 +313,11 @@ class Linter:
             linter_logger.info("\n###\n#\n# {}\n#\n###".format("Parsed Tree:"))
             linter_logger.info("\n" + parsed.stringify())
         # We may succeed parsing, but still have unparsable segments. Extract them
-        # here.
+        # here. When the parser has already proven the tree unparsable-free
+        # (the Rust native-AST path records this while building the tree),
+        # skip the whole-tree generator walk.
+        if getattr(parsed, "_known_unparsable_free", False):
+            return parsed, violations
         for unparsable in parsed.iter_unparsables():
             # No exception has been raised explicitly, but we still create one here
             # so that we can use the common interface

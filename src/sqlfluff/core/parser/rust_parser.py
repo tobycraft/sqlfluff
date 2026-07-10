@@ -290,7 +290,7 @@ try:
 
                     if _prof is not None:
                         _ts = time.perf_counter()
-                    _matched = self._apply_flat_match(
+                    _matched, _saw_unparsable = self._apply_flat_match(
                         flat, code_segments, parse_context
                     )
                     if _prof is not None:
@@ -380,6 +380,17 @@ try:
                 result = self.RootSegment(
                     segments[:_start_idx] + content + segments[_end_idx:], fname=fname
                 )
+
+                if _NATIVE_AST_ENABLED:
+                    # The flat walk saw every constructed segment, so the
+                    # parser knows definitively whether the tree contains any
+                    # UnparsableSegment (the content assembly above may also
+                    # add one for unmatched or untruthy content). The linter
+                    # uses this to skip the whole-tree iter_unparsables()
+                    # walk for clean parses.
+                    result._known_unparsable_free = (
+                        not _saw_unparsable and _match_truthy and not _unmatched
+                    )
 
                 # Attach the mutable Rust arena tree (RsTree). This is the
                 # id-addressable façade tree (RsTree/RsHandle) used by
@@ -726,6 +737,7 @@ try:
             cursor = 0
             get_class = self._get_segment_class_by_name
             meta_by_code = self._META_BY_CODE
+            saw_unparsable = False
 
             def build() -> tuple["BaseSegment", ...]:
                 nonlocal cursor
@@ -833,6 +845,10 @@ try:
                 if matched_class is None:  # pragma: no cover
                     return result_segments
 
+                if matched_class is UnparsableSegment:
+                    nonlocal saw_unparsable
+                    saw_unparsable = True
+
                 segment_kwargs: dict[str, Any] = {}
                 if instance_types:
                     segment_kwargs["instance_types"] = instance_types
@@ -855,7 +871,7 @@ try:
                 parse_context.increment_parse_nodes()
                 return (new_seg,)
 
-            return build()
+            return build(), saw_unparsable
 
         @staticmethod
         def _template_segment_to_rstoken(segment: TemplateSegment) -> "RsToken":
