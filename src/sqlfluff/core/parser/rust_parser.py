@@ -40,6 +40,11 @@ if TYPE_CHECKING:  # pragma: no cover
 # Instantiate the parser logger
 parser_logger = logging.getLogger("sqlfluff.parser")
 
+# The stock BaseSegment.from_result_segments implementation, referenced to
+# detect classes where the flat AST builder can call the constructor
+# directly instead of going through the classmethod indirection.
+_BASE_FRS = BaseSegment.from_result_segments.__func__
+
 
 # --- Sub-stage parse profiling -------------------------------------------------
 # RustParser.parse() is a fast Rust core wrapped in O(nodes) Python work. To find
@@ -928,9 +933,16 @@ try:
                 if escape_replacement:  # pragma: no cover
                     segment_kwargs["escape_replacements"] = [escape_replacement]
 
-                new_seg = matched_class.from_result_segments(
-                    result_segments, segment_kwargs
-                )
+                # Direct constructor call for classes on the stock
+                # from_result_segments (one Python frame per node saved);
+                # classes with custom builders (RawSegment re-classing,
+                # BracketedSegment) keep the classmethod dispatch.
+                if matched_class.from_result_segments.__func__ is _BASE_FRS:
+                    new_seg = matched_class(segments=result_segments, **segment_kwargs)
+                else:
+                    new_seg = matched_class.from_result_segments(
+                        result_segments, segment_kwargs
+                    )
                 parse_context.increment_parse_nodes()
                 return (new_seg,)
 
