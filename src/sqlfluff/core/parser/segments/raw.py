@@ -106,7 +106,14 @@ class RawSegment(BaseSegment):
         d["quoted_value"] = quoted_value
         d["escape_replacements"] = escape_replacements
         d["casefold"] = casefold
-        d["_raw_value"] = self.normalize()
+        # normalize() is the identity unless a quoted_value or escape
+        # replacement is configured; skip the call in the common case
+        # (this runs once per raw token, so it's hot).
+        d["_raw_value"] = (
+            _raw
+            if quoted_value is None and escape_replacements is None
+            else self.normalize()
+        )
 
     @functools.cached_property
     def representation(self) -> str:
