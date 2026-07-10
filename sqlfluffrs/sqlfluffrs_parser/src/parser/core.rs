@@ -597,7 +597,7 @@ impl<'a> Parser<'a> {
     /// Handle TypedParser using table-driven approach
     pub(crate) fn handle_typed_parser(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
     ) -> Result<TableFrameResult, ParseError> {
         let ctx = &self.grammar_ctx;
         let grammar_id = frame.grammar_id;
@@ -1556,7 +1556,7 @@ impl<'a> Parser<'a> {
     /// Consumes all tokens until terminator or EOF, preserving bracket structure
     pub(crate) fn handle_anything_initial(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         grammar_id: GrammarId,
         parent_terminators: &[GrammarId],
         parent_max_idx: Option<usize>,

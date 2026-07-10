@@ -15,7 +15,7 @@ impl Parser<'_> {
     /// Handle AnyNumberOf Initial state using table-driven approach
     pub(crate) fn handle_anynumberof_initial(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         self.pos = frame.pos;
@@ -222,7 +222,7 @@ impl Parser<'_> {
     /// Handle AnyNumberOf WaitingForChild state using table-driven approach
     pub(crate) fn handle_anynumberof_waiting_for_child(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -289,7 +289,7 @@ impl Parser<'_> {
     #[inline]
     fn try_next_anynumberof_candidate(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let ctx = frame
@@ -324,7 +324,7 @@ impl Parser<'_> {
     #[inline]
     fn process_anynumberof_longest_match(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let ctx = frame
@@ -440,7 +440,7 @@ impl Parser<'_> {
     #[inline]
     fn continue_anynumberof_matching(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let ctx = frame
@@ -489,7 +489,7 @@ impl Parser<'_> {
     /// Handle AnyNumberOf Combining state using table-driven approach
     pub(crate) fn handle_anynumberof_combining(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let FrameContext::AnyNumberOf(AnyNumberOfState {

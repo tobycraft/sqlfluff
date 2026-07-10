@@ -18,7 +18,7 @@ impl Parser<'_> {
     /// Handle Ref Initial state using table-driven approach
     pub(crate) fn handle_ref_initial(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let grammar_id = frame.grammar_id;
@@ -175,7 +175,7 @@ impl Parser<'_> {
     /// Handle Ref WaitingForChild state using table-driven approach
     pub(crate) fn handle_ref_waiting_for_child(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
     ) -> Result<TableFrameResult, ParseError> {
@@ -227,7 +227,7 @@ impl Parser<'_> {
     /// Handle Ref Combining state using table-driven approach
     pub(crate) fn handle_ref_combining(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
     ) -> Result<TableFrameResult, ParseError> {
         let FrameContext::Ref(state) = &mut frame.context else {
             return Err(ParseError::new(

@@ -21,7 +21,7 @@ impl Parser<'_> {
     /// - Child 1: delimiter
     pub(crate) fn handle_delimited_initial(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         self.pos = frame.pos;
@@ -182,7 +182,7 @@ impl Parser<'_> {
     /// - MatchingDelimiter: stores delimiter_match (doesn't push immediately), checks termination
     pub(crate) fn handle_delimited_waiting_for_child(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -214,7 +214,7 @@ impl Parser<'_> {
     /// match, or finalize the list when the element fails or a terminator hits.
     fn handle_delimited_element_result(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -408,7 +408,7 @@ impl Parser<'_> {
     /// the element on an optional-delimiter miss, or finalize the list.
     fn handle_delimited_delimiter_result(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -654,7 +654,7 @@ impl Parser<'_> {
     /// Handle Delimited Combining state using table-driven approach
     pub(crate) fn handle_delimited_combining(
         &mut self,
-        frame: TableParseFrame,
+        frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         let FrameContext::Delimited(DelimitedState {

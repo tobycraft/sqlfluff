@@ -17,7 +17,7 @@ impl Parser<'_> {
     /// Handle Sequence Initial state using table-driven approach
     pub(crate) fn handle_sequence_initial(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         self.pos = frame.pos;
@@ -182,7 +182,7 @@ impl Parser<'_> {
     /// stack,
     pub(crate) fn handle_sequence_waiting_for_child(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -257,7 +257,7 @@ impl Parser<'_> {
     #[inline]
     fn handle_sequence_child_failure(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         current_element_optional: bool,
         current_element_grammar_id: GrammarId,
         parse_mode: ParseMode,
@@ -501,7 +501,7 @@ impl Parser<'_> {
     #[inline]
     fn handle_sequence_child_success(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: usize,
         allow_gaps: bool,
@@ -708,7 +708,7 @@ impl Parser<'_> {
         elements: &[GrammarId],
         child_frame_id: usize,
         child_terminators: &[GrammarId],
-    ) -> TableParseFrame {
+    ) -> Box<TableParseFrame> {
         let child_start_pos = self.calculate_sequence_child_start_position(
             matched_idx,
             allow_gaps,
@@ -739,7 +739,7 @@ impl Parser<'_> {
     /// Handle Sequence Combining state using table-driven approach
     pub(crate) fn handle_sequence_combining(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         _stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         // Take ownership of the context fields we need, avoiding clones.

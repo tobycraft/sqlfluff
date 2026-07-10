@@ -16,7 +16,7 @@ impl Parser<'_> {
     /// Handle OneOf Initial state using table-driven approach
     pub(crate) fn handle_oneof_initial(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         // CRITICAL: Restore parser position from frame
@@ -183,7 +183,7 @@ impl Parser<'_> {
     /// Handle OneOf WaitingForChild state using table-driven approach
     pub(crate) fn handle_oneof_waiting_for_child(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         child_match: &Arc<MatchResult>,
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
@@ -365,7 +365,7 @@ impl Parser<'_> {
     /// Handle OneOf Combining state using table-driven approach
     pub(crate) fn handle_oneof_combining(
         &mut self,
-        mut frame: TableParseFrame,
+        mut frame: Box<TableParseFrame>,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
         // Extract values from context by moving them out
