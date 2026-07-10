@@ -762,7 +762,10 @@ class JinjaTemplater(PythonTemplater):
         # (from config or from a path) is validated at construction time and
         # can raise user-facing errors which we must preserve.
         if (
-            not re.search(r"\{[{%#]", in_str)
+            in_str  # Empty input: the traced path yields no slices at all,
+            # while the default TemplatedFile would synthesise an (uncovered)
+            # zero-length literal, confusing variant generation downstream.
+            and not re.search(r"\{[{%#]", in_str)
             and not self._get_macros_path(config, "load_macros_from_path")
             and not config.get_section(
                 (self.templater_selector, self.name, "macros")

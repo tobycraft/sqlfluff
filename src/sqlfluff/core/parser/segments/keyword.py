@@ -1,8 +1,7 @@
 """The KeywordSegment class."""
 
-from typing import Callable, Optional, Union
+from typing import Optional
 
-from sqlfluff.core.parser.markers import PositionMarker
 from sqlfluff.core.parser.segments.base import SourceFix
 from sqlfluff.core.parser.segments.common import WordSegment
 
@@ -17,28 +16,10 @@ class KeywordSegment(WordSegment):
 
     type = "keyword"
 
-    def __init__(
-        self,
-        raw: Optional[str] = None,
-        pos_marker: Optional[PositionMarker] = None,
-        instance_types: tuple[str, ...] = (),
-        source_fixes: Optional[list[SourceFix]] = None,
-        trim_chars: Optional[tuple[str, ...]] = None,
-        quoted_value: Optional[tuple[str, Union[int, str]]] = None,
-        escape_replacements: Optional[list[tuple[str, str]]] = None,
-        casefold: Optional[Callable[[str], str]] = None,
-    ):
-        """If no other name is provided we extrapolate it from the raw."""
-        super().__init__(
-            raw=raw,
-            pos_marker=pos_marker,
-            instance_types=instance_types,
-            source_fixes=source_fixes,
-            trim_chars=trim_chars,
-            quoted_value=quoted_value,
-            escape_replacements=escape_replacements,
-            casefold=casefold,
-        )
+    # NOTE: No __init__ override. A previous pure-forwarding __init__ (a
+    # strict subset of RawSegment.__init__'s parameters with the same
+    # defaults) added a Python call frame to every keyword instantiation -
+    # one of the highest-volume constructions during parsing.
 
     def edit(
         self, raw: Optional[str] = None, source_fixes: Optional[list[SourceFix]] = None
