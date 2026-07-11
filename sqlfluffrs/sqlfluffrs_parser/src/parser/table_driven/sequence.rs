@@ -601,9 +601,14 @@ impl Parser<'_> {
             if child_match.matched_class.is_some() {
                 ctx.child_matches.push(Arc::clone(child_match));
             } else {
-                ctx.child_matches.extend(child_match.child_matches.clone());
+                // Extend directly from borrowed iterators; `Vec::clone()` here
+                // would allocate a throwaway Vec just to drain it (DHAT showed
+                // this as ~190k allocations/pass). Cloning the Arc handles and
+                // the Copy insert tuples element-wise avoids the temporary.
+                ctx.child_matches
+                    .extend(child_match.child_matches.iter().cloned());
                 ctx.insert_segments
-                    .extend(child_match.insert_segments.clone());
+                    .extend(child_match.insert_segments.iter().copied());
             }
 
             ctx.advance_element_idx();
