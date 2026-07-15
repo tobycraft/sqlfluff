@@ -146,6 +146,33 @@ impl Parser<'_> {
             );
         }
 
+        // Inline fast path: a terminal element (e.g. a Ref to an identifier
+        // parser) needs no frame machinery. Feed the result straight into the
+        // element-phase handler.
+        self.pos = start_pos;
+        let terminal_result = self.try_terminal_inline(elements_id, Some(max_idx))?;
+
+        // First-token hint gate (see Parser::simple_hint_rejects), checked
+        // before `child_terminators` is moved into the context below. Only
+        // applies when `elements_id` is a single element - when it wraps
+        // multiple candidates in a OneOf, that grammar already prunes them
+        // itself via `prune_options`. Skipped once the terminal fast path
+        // above already produced a result.
+        let gate_rejects =
+            terminal_result.is_none() && self.simple_hint_rejects(elements_id, start_pos);
+
+        // Pass child_terminators to allow the element matcher to try all candidates
+        // without early termination from local terminators (e.g., ObjectReferenceTerminator).
+        let child_frame = (terminal_result.is_none() && !gate_rejects).then(|| {
+            TableParseFrame::new_child(
+                stack.frame_id_counter,
+                elements_id,
+                start_pos,
+                &child_terminators,
+                Some(max_idx),
+            )
+        });
+
         // Store context for the element/delimiter phase loop.
         frame.context = FrameContext::Delimited(DelimitedState {
             grammar_id,
@@ -161,33 +188,18 @@ impl Parser<'_> {
             working_match: Arc::new(MatchResult::empty_at(start_pos)),
         });
 
-        // Inline fast path: a terminal element (e.g. a Ref to an identifier
-        // parser) needs no frame machinery. Feed the result straight into the
-        // element-phase handler.
-        self.pos = start_pos;
-        if let Some(mr) = self.try_terminal_inline(elements_id, Some(max_idx))? {
+        // Fast paths resolved above take priority over frame machinery.
+        if let Some(mr) = terminal_result {
             let end_pos = self.pos;
             let arc = Arc::new(mr);
             return self.handle_delimited_waiting_for_child(frame, &arc, &end_pos, stack);
         }
 
-        // Pass child_terminators to allow the element matcher to try all candidates
-        // without early termination from local terminators (e.g., ObjectReferenceTerminator).
-        let child_frame = {
-            let FrameContext::Delimited(state) = &frame.context else {
-                unreachable!("Delimited context was just set");
-            };
-            TableParseFrame::new_child(
-                stack.frame_id_counter,
-                elements_id,
-                start_pos,
-                &state.child_terminators,
-                Some(max_idx),
-            )
-        };
-
-        // Push child to match element(s).
-        Ok(stack.push_child_and_wait(frame, child_frame, 0))
+        // Skip creating a real child frame when the gate proved it can't match.
+        match child_frame {
+            Some(child_frame) => Ok(stack.push_child_and_wait(frame, child_frame, 0)),
+            None => Ok(stack.gate_child_and_wait(frame, GrammarVariant::Delimited, 0, start_pos)),
+        }
     }
 
     /// Handle Delimited WaitingForChild state using table-driven approach
@@ -415,6 +427,19 @@ impl Parser<'_> {
             return self.handle_delimited_delimiter_result(frame, &arc, &end_pos, stack);
         }
 
+        // First-token hint gate (see Parser::simple_hint_rejects): skip
+        // creating a real child frame when the delimiter's simple hint
+        // rules out a match at this position.
+        let delimiter_pos = *working_idx;
+        if self.simple_hint_rejects(delimiter_id, delimiter_pos) {
+            return Ok(stack.gate_child_and_wait(
+                frame,
+                GrammarVariant::Delimited,
+                0,
+                delimiter_pos,
+            ));
+        }
+
         // IMPORTANT: Don't pass max_idx to delimiter frame!
         // The delimiter should be matchable at the current position even if
         // max_idx was computed based on terminators. The delimiter itself
@@ -475,12 +500,23 @@ impl Parser<'_> {
                 // With new structure, elements_id (child 0) is the element grammar
                 // Just push it to try matching elements again
                 let current_max_idx = *max_idx;
+                let retry_pos = *working_idx;
+
+                // First-token hint gate (see Parser::simple_hint_rejects).
+                if self.simple_hint_rejects(elements_id, retry_pos) {
+                    return Ok(stack.gate_child_and_wait(
+                        frame,
+                        GrammarVariant::Delimited,
+                        0,
+                        retry_pos,
+                    ));
+                }
 
                 // Use child_terminators (excludes local terminators)
                 let element_frame = TableParseFrame::new_child(
                     stack.frame_id_counter,
                     elements_id,
-                    *working_idx,
+                    retry_pos,
                     &child_terminators_clone,
                     Some(current_max_idx),
                 );
@@ -664,11 +700,17 @@ impl Parser<'_> {
                 *working_idx
             );
 
+        // First-token hint gate (see Parser::simple_hint_rejects).
+        let retry_pos = *working_idx;
+        if self.simple_hint_rejects(elements_id, retry_pos) {
+            return Ok(stack.gate_child_and_wait(frame, GrammarVariant::Delimited, 0, retry_pos));
+        }
+
         // Use child_terminators (excludes local terminators)
         let element_frame = TableParseFrame::new_child(
             stack.frame_id_counter,
             elements_id,
-            *working_idx,
+            retry_pos,
             &child_terminators_clone,
             Some(*max_idx), // Use recalculated max_idx
         );
