@@ -284,29 +284,29 @@ jobs:
     needs: [plan, build]
     if: ${{ !cancelled() && needs.plan.outputs.has_work == 'true' }}
     runs-on: ubuntu-24.04-arm
-    # The whole unsharded suite took ~84 min under Valgrind; the slowest
-    # shard (python-tpcds) is expected around 45-55 min.
-    timeout-minutes: 75
+    # Python-parser benchmarks are excluded below (see the group comment), so
+    # this only covers the two rust shards; ~5-10 min each under Valgrind.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 8
       matrix:
         sha: ${{ fromJson(needs.plan.outputs.all_shas) }}
-        # Valgrind instrumentation runs the suite ~30x slower than native, so
-        # one job per commit took ~80 minutes, dominated by the pure-Python
-        # parser benchmarks. CodSpeed supports sharding a suite across
-        # parallel jobs in the same workflow run and aggregates the shards
-        # into one report, as long as each benchmark runs exactly once per
-        # commit — these filters are disjoint and cover all 6 benchmarks.
-        # The python benchmarks get a shard each (they dominate the runtime);
-        # the cheap rust ones ride along per-suite rather than alone so that
-        # a shard can't end up all-skipped (and upload an empty run) on
-        # commits where the native_ast guard in the driver skips.
+        # The python-tpch/python-tpcds benchmarks are deliberately excluded
+        # here: building the full segment tree in pure Python allocates far
+        # more objects than the Rust-backed paths, which drives enough
+        # mmap/munmap arena traffic from CPython's allocator that CodSpeed's
+        # Valgrind-based simulation instrument can't attribute the time and
+        # flags it as unmeasurable syscalls, undercounting the benchmark. They
+        # still run for real under `benchmark-walltime` above, which measures
+        # wall-clock time (syscalls included) rather than instruction count.
+        # CodSpeed supports sharding a suite across parallel jobs in the same
+        # workflow run and aggregates the shards into one report, as long as
+        # each benchmark runs exactly once per commit — these filters are
+        # disjoint and cover the 4 non-python benchmarks.
         group:
           - {name: rust-tpch, filter: "not python and tpch"}
           - {name: rust-tpcds, filter: "not python and tpcds"}
-          - {name: python-tpch, filter: "python and tpch"}
-          - {name: python-tpcds, filter: "python and tpcds"}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
