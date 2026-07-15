@@ -2,14 +2,23 @@
 ## CodSpeed Historical Commit Sweep ##
 #####################################
 #
-# Manually-triggered sweep of the last N commits on `main` (not older than
-# v4.2.2, since rust_parser.py doesn't exist before it), or of a single
-# explicitly-named commit via the `commit_sha` input, benchmarking each with
-# pytest-codspeed (test/test_codspeed_tpc_parse.py) across all 3 parser
-# modes (python / rust_legacy / rust_native_ast) x 2 suites
-# (tpch / tpcds). This is the CI equivalent of the local utils/perf_sweep
-# tool, using CodSpeed's own noise mitigation instead of a hand-rolled
+# Sweep benchmarking commits with pytest-codspeed
+# (test/test_codspeed_tpc_parse.py) across all 3 parser modes
+# (python / rust_legacy / rust_native_ast) x 2 suites (tpch / tpcds).
+# This is the CI equivalent of the local utils/perf_sweep tool, using
+# CodSpeed's own noise mitigation instead of a hand-rolled
 # valgrind/adaptive-walltime harness.
+#
+# Triggered two ways:
+#   - Automatically after each completed run of the main CI workflow
+#     (pushes to main and pull request branches alike), sweeping just the
+#     commit that CI ran on — but only when that CI run was green; the
+#     plan job skips otherwise. Perf-irrelevant commits (docs, tests, CI
+#     config, ...) are filtered out, same as in count mode.
+#   - Manually via workflow_dispatch: either the last N commits on main
+#     (not older than v4.2.2, since rust_parser.py doesn't exist before
+#     it), or a single explicitly-named commit via the `commit_sha` input
+#     (which bypasses the perf-irrelevance filter).
 #
 # Two instrument types per commit:
 #   - walltime, on codspeed-macro (bare-metal ARM64): real elapsed time,
@@ -52,9 +61,19 @@ on:
         description: A single commit hash to sweep instead of the most recent commits. Bypasses the perf-irrelevance filter, but still skips the commit if already recorded in .github/codspeed-swept.json.
         required: false
         default: ""
+  # Only fires once this workflow file is on the default branch. The
+  # `conclusion == 'success'` gate lives on the plan job below —
+  # workflow_run has no filter for it at the trigger level.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 jobs:
   plan:
+    # For CI-triggered runs, only proceed when that CI run was green.
+    # Manual dispatches always proceed. Every other job needs (directly or
+    # transitively) this one, so this gate skips the whole workflow.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     # Runs in seconds; the timeout only guards against a hung git fetch.
     timeout-minutes: 10
@@ -72,7 +91,11 @@ jobs:
         id: plan
         env:
           COMMIT_COUNT: ${{ inputs.commit_count }}
-          COMMIT_SHA: ${{ inputs.commit_sha }}
+          # For CI-triggered runs, sweep the exact commit that CI ran on.
+          COMMIT_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit_sha }}
+          # CI-triggered runs keep the perf-irrelevance filter even in
+          # single-commit mode; a manually dispatched commit_sha bypasses it.
+          APPLY_SKIP_FILTER: ${{ github.event_name == 'workflow_run' }}
         run: python .github/scripts/codspeed_sweep_plan.py
 
   build:
@@ -80,8 +103,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.has_work == 'true'
     runs-on: ubuntu-24.04-arm
-    # ~2 min with warm caches; a dialect-cache miss adds ~3 min and a cold
-    # Rust dependency cache means compiling the workspace from scratch.
+    # ~5 min typical (dialect codegen runs every time); a cold Rust
+    # dependency cache means compiling the workspace from scratch.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -96,59 +119,6 @@ jobs:
 
       - name: Checkout target commit
         run: git checkout --force ${{ matrix.sha }}
-
-      - name: Compute dialect generation hash
-        id: dialect_hash
-        # Content-addressed key for the dialect-codegen inputs, from git
-        # object IDs at the checked-out target commit (blob IDs for files,
-        # tree IDs for directories, so any change under a directory changes
-        # its ID). `utils/rustify.py build` regenerates the cached output
-        # from exactly these inputs. Paths absent at older commits key as
-        # "absent"; the guard only trips if there are no inputs at all,
-        # which would mean a broken checkout.
-        run: |
-          inputs=$(
-            for path in \
-              utils/rustify.py \
-              utils/build_dialect.py \
-              utils/build_lexers.py \
-              utils/build_parsers.py \
-              utils/build_dialects.py \
-              src/sqlfluff/core/dialects \
-              src/sqlfluff/core/parser \
-              src/sqlfluff/dialects
-            do
-              echo "$path $(git rev-parse --quiet --verify "HEAD:$path" || echo absent)"
-            done
-          )
-          echo "$inputs"
-          if ! echo "$inputs" | grep -qv 'absent$'; then
-            echo "none of the dialect-generation paths exist in this checkout" >&2
-            exit 1
-          fi
-          echo "hash=$(echo "$inputs" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache generated Rust dialect files
-        # Architecture-independent text output, so this key is shared across
-        # commits in the sweep that don't touch dialect/grammar code, which
-        # is most of them. Skips ~105s of codegen (per local perf_sweep
-        # timings) on a hit.
-        id: dialect_cache
-        uses: actions/cache@v5
-        with:
-          path: sqlfluffrs/sqlfluffrs_dialects/src/dialect
-          key: dialect-gen-${{ steps.dialect_hash.outputs.hash }}
-
-      - name: Refresh restored dialect file mtimes
-        if: steps.dialect_cache.outputs.cache-hit == 'true'
-        # actions/cache restores files with the mtimes they were cached
-        # with, while the checkout above writes the Python sources with the
-        # current time, so restored generated files always look stale to
-        # build.rs's Makefile-style mtime check. It would then regenerate
-        # them inside maturin's manylinux container, whose python3 doesn't
-        # have sqlfluff's dependencies. Touch the restored files so they
-        # count as newer than the checkout and the check passes.
-        run: find sqlfluffrs/sqlfluffrs_dialects/src/dialect -exec touch {} +
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -174,11 +144,9 @@ jobs:
           key: ${{ runner.arch }}
 
       - name: Install sqlfluff (needed for rustify.py's dialect introspection)
-        if: steps.dialect_cache.outputs.cache-hit != 'true'
         run: uv pip install --system -e .
 
       - name: Generate Rust dialect files
-        if: steps.dialect_cache.outputs.cache-hit != 'true'
         run: python utils/rustify.py build
 
       - name: Build the Rust extension (release, manylinux)
