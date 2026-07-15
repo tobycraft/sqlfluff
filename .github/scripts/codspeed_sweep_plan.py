@@ -13,10 +13,13 @@ tool no longer exists in this repo), and writes `all_shas`/`has_work` to
 $GITHUB_OUTPUT.
 
 Alternatively, if COMMIT_SHA is set (non-empty), that single commit is
-selected instead of walking COMMIT_COUNT commits back from `main`. An
-explicitly-named commit bypasses the perf-irrelevance filter — the user
-asked for it, so they get it — but is still dropped if already recorded in
-.github/codspeed-swept.json, since CodSpeed errors on a duplicate SHA.
+selected instead of walking COMMIT_COUNT commits back from `main`. A
+manually-dispatched commit bypasses the perf-irrelevance filter — the user
+asked for it, so they get it — while CI-triggered runs (which pass the CI
+run's head commit plus APPLY_SKIP_FILTER=true) keep the filter, so a green
+docs-only commit doesn't burn benchmark runners. Either way the commit is
+still dropped if already recorded in .github/codspeed-swept.json, since
+CodSpeed errors on a duplicate SHA.
 """
 
 from __future__ import annotations
@@ -85,6 +88,10 @@ def _resolve_commit(rev: str) -> str:
 def main() -> None:
     """Select the commits to sweep this run and write them to $GITHUB_OUTPUT."""
     commit_sha = os.environ.get("COMMIT_SHA", "").strip()
+    # Count mode always filters perf-irrelevant commits. Single-commit mode
+    # only does when APPLY_SKIP_FILTER says so (CI-triggered runs); a
+    # manually dispatched commit_sha bypasses the filter.
+    apply_filter = not commit_sha or os.environ.get("APPLY_SKIP_FILTER") == "true"
 
     swept = set(json.load(open(SWEPT_PATH))) if os.path.exists(SWEPT_PATH) else set()
 
@@ -93,12 +100,6 @@ def main() -> None:
         # the 4.2.2 floor, and the checkout already has the fork's full
         # history.
         requested = [_resolve_commit(commit_sha)]
-        # Explicitly-named commits bypass the perf-irrelevance filter; only
-        # the already-swept check applies (a duplicate SHA is a hard error on
-        # CodSpeed's side, not a wasted run).
-        remaining = [sha for sha in requested if sha not in swept]
-        benchmarkable = remaining
-        skipped = 0
     else:
         commit_count = int(os.environ["COMMIT_COUNT"])
 
@@ -114,15 +115,17 @@ def main() -> None:
             check=True,
         ).stdout.split()
 
-        remaining = [sha for sha in requested if sha not in swept]
+    # The already-swept check applies in every mode: a duplicate SHA is a
+    # hard error on CodSpeed's side, not just a wasted run.
+    remaining = [sha for sha in requested if sha not in swept]
 
-        benchmarkable = []
-        skipped = 0
-        for sha in remaining:
-            if _is_skippable(_changed_files(sha)):
-                skipped += 1
-            else:
-                benchmarkable.append(sha)
+    benchmarkable = []
+    skipped = 0
+    for sha in remaining:
+        if apply_filter and _is_skippable(_changed_files(sha)):
+            skipped += 1
+        else:
+            benchmarkable.append(sha)
 
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         f.write(f"all_shas={json.dumps(benchmarkable)}\n")
