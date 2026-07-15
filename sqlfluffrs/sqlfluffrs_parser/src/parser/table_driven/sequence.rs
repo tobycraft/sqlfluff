@@ -153,6 +153,17 @@ impl Parser<'_> {
             return self.handle_sequence_waiting_for_child(frame, &arc, &end_pos, stack);
         }
 
+        // First-token hint gate: when the element's simple hint rules out a
+        // match at this position, skip the frame and feed an empty result to
+        // the waiting handler (identical to what the frame would return).
+        if self.simple_hint_rejects(elements[current_element_idx], child_start_pos) {
+            frame.state = FrameState::WaitingForChild {
+                child_index: current_element_idx,
+            };
+            let arc = Arc::new(MatchResult::empty_at(child_start_pos));
+            return self.handle_sequence_waiting_for_child(frame, &arc, &child_start_pos, stack);
+        }
+
         // Create child frame with potentially new element after meta buffering
         // PYTHON PARITY: Pass only parent terminators to children (not Sequence's own).
         let child_terms = Self::sequence_child_terminators(&mut frame);
@@ -415,6 +426,20 @@ impl Parser<'_> {
                 return self.handle_sequence_waiting_for_child(frame, &arc, &end_pos, stack);
             }
 
+            // First-token hint gate (see simple_hint_rejects): skip the frame
+            // when the element provably cannot match at this position.
+            if self.simple_hint_rejects(elements[next_element_idx], child_start_pos) {
+                {
+                    let ctx = frame.context.as_sequence_mut().unwrap();
+                    ctx.current_element_idx = next_element_idx;
+                }
+                frame.state = FrameState::WaitingForChild {
+                    child_index: next_element_idx,
+                };
+                let arc = Arc::new(MatchResult::empty_at(child_start_pos));
+                return self.handle_sequence_waiting_for_child(frame, &arc, &child_start_pos, stack);
+            }
+
             let child_frame_id = stack.frame_id_counter;
             let child_terms = Self::sequence_child_terminators(&mut frame);
             let child_frame = self.match_sequence_next_element(
@@ -664,6 +689,19 @@ impl Parser<'_> {
                     return self.handle_sequence_waiting_for_child(frame, &arc, &end_pos, stack);
                 }
 
+                // First-token hint gate (see simple_hint_rejects).
+                if self.simple_hint_rejects(next_element, matched_idx) {
+                    {
+                        let ctx = frame.context.as_sequence_mut().unwrap();
+                        ctx.current_element_idx = current_idx;
+                    }
+                    frame.state = FrameState::WaitingForChild {
+                        child_index: current_idx,
+                    };
+                    let arc = Arc::new(MatchResult::empty_at(matched_idx));
+                    return self.handle_sequence_waiting_for_child(frame, &arc, &matched_idx, stack);
+                }
+
                 // PYTHON PARITY: Use parent terminators (without Sequence's own) for children
                 let child_terms = Self::sequence_child_terminators(&mut frame);
                 let child_frame_id = stack.frame_id_counter;
@@ -739,6 +777,19 @@ impl Parser<'_> {
             let end_pos = self.pos;
             let arc = Arc::new(mr);
             return self.handle_sequence_waiting_for_child(frame, &arc, &end_pos, stack);
+        }
+
+        // First-token hint gate (see simple_hint_rejects).
+        if self.simple_hint_rejects(next_element, child_start_pos) {
+            {
+                let ctx = frame.context.as_sequence_mut().unwrap();
+                ctx.current_element_idx = current_idx;
+            }
+            frame.state = FrameState::WaitingForChild {
+                child_index: current_idx,
+            };
+            let arc = Arc::new(MatchResult::empty_at(child_start_pos));
+            return self.handle_sequence_waiting_for_child(frame, &arc, &child_start_pos, stack);
         }
 
         // Create child frame for next element
