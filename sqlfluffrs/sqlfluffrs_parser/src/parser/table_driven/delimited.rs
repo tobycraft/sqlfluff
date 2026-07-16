@@ -151,7 +151,7 @@ impl Parser<'_> {
         // applies when `elements_id` is a single element - when it wraps
         // multiple candidates in a OneOf, that grammar already prunes them
         // itself via `prune_options`.
-        let gate_rejects = self.simple_hint_rejects(elements_id, start_pos);
+        let gate_rejects = self.simple_hint_rejects(elements_id, start_pos, max_idx);
 
         // Store context for the element/delimiter phase loop.
         frame.context = FrameContext::Delimited(DelimitedState {
@@ -429,9 +429,12 @@ impl Parser<'_> {
 
         // First-token hint gate (see Parser::simple_hint_rejects): skip
         // creating a real child frame when the delimiter's simple hint
-        // rules out a match at this position.
+        // rules out a match at this position. Bounded by the full token
+        // stream, not `max_idx`: the delimiter frame below is itself
+        // unconstrained by `max_idx` (it's filtered out of terminators), so
+        // the gate must see the same window it does.
         let delimiter_pos = *working_idx;
-        if self.simple_hint_rejects(delimiter_id, delimiter_pos) {
+        if self.simple_hint_rejects(delimiter_id, delimiter_pos, self.tokens.len()) {
             return Ok(stack.gate_child_and_wait(
                 frame,
                 GrammarVariant::Delimited,
@@ -503,7 +506,7 @@ impl Parser<'_> {
                 let retry_pos = *working_idx;
 
                 // First-token hint gate (see Parser::simple_hint_rejects).
-                if self.simple_hint_rejects(elements_id, retry_pos) {
+                if self.simple_hint_rejects(elements_id, retry_pos, current_max_idx) {
                     return Ok(stack.gate_child_and_wait(
                         frame,
                         GrammarVariant::Delimited,
@@ -702,7 +705,7 @@ impl Parser<'_> {
 
         // First-token hint gate (see Parser::simple_hint_rejects).
         let retry_pos = *working_idx;
-        if self.simple_hint_rejects(elements_id, retry_pos) {
+        if self.simple_hint_rejects(elements_id, retry_pos, *max_idx) {
             return Ok(stack.gate_child_and_wait(frame, GrammarVariant::Delimited, 0, retry_pos));
         }
 
