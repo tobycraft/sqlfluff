@@ -609,14 +609,30 @@ impl<'a> Parser<'a> {
         &mut self,
         mut frame: Box<TableParseFrame>,
     ) -> Result<TableFrameResult, ParseError> {
-        let ctx = &self.grammar_ctx;
-        let grammar_id = frame.grammar_id;
         vdebug!(
             "START TypedParser: frame_id={}, pos={}, grammar_id={:?}",
             frame.frame_id,
             frame.pos,
-            grammar_id
+            frame.grammar_id
         );
+        self.pos = frame.pos;
+        let match_result = self.typed_parser_match(frame.grammar_id)?;
+        // On a failed match `typed_parser_match` leaves the position at the
+        // frame position, so `self.pos` is the correct end position either way.
+        frame.end_pos = Some(self.pos);
+        frame.state = FrameState::Complete(Arc::new(match_result));
+        Ok(TableFrameResult::Push(frame))
+    }
+
+    /// Frame-less core of the TypedParser match, shared by the frame handler
+    /// above and the inline terminal fast path in OneOf. Matches at
+    /// `self.pos`, which is advanced past the token on success and left
+    /// unchanged on a failed match.
+    pub(crate) fn typed_parser_match(
+        &mut self,
+        grammar_id: GrammarId,
+    ) -> Result<MatchResult, ParseError> {
+        let ctx = &self.grammar_ctx;
         // Extract all data from tables first (before any self methods)
         let tables = ctx.tables();
 
@@ -633,8 +649,6 @@ impl<'a> Parser<'a> {
         let template = tables.get_string(template_id);
         let token_type = tables.get_string(token_type_id);
         let raw_class = tables.get_string(raw_class_id);
-
-        self.pos = frame.pos;
 
         vdebug!(
             "TypedParser[table]: pos={}, template='{}', token_type='{}'",
@@ -688,8 +702,7 @@ impl<'a> Parser<'a> {
 
                     // Extra debug: show token instance/class types
                     vdebug!(
-                        "TypedParser[table] MATCH DETAILS: frame_id={}, grammar_id={:?}, token_idx={}, instance_types={:?}, class_types={:?}",
-                        frame.frame_id,
+                        "TypedParser[table] MATCH DETAILS: grammar_id={:?}, token_idx={}, instance_types={:?}, class_types={:?}",
                         grammar_id,
                         token_pos,
                         inst_types,
@@ -804,9 +817,7 @@ impl<'a> Parser<'a> {
                 // Advance position after capturing token data
                 self.bump();
 
-                frame.state = FrameState::Complete(Arc::new(match_result));
-                frame.end_pos = Some(self.pos);
-                Ok(TableFrameResult::Push(frame))
+                Ok(match_result)
             }
             Some(_tok) => {
                 // Include instance and class type diagnostics to help debug why a
@@ -824,16 +835,12 @@ impl<'a> Parser<'a> {
                     inst_types,
                     class_types
                 );
-                frame.state = FrameState::Complete(Arc::new(MatchResult::empty_at(frame.pos)));
-                frame.end_pos = Some(frame.pos);
-                Ok(TableFrameResult::Push(frame))
+                Ok(MatchResult::empty_at(self.pos))
             }
 
             None => {
                 vdebug!("TypedParser[table] NOMATCH: EOF at pos={}", self.pos);
-                frame.state = FrameState::Complete(Arc::new(MatchResult::empty_at(frame.pos)));
-                frame.end_pos = Some(frame.pos);
-                Ok(TableFrameResult::Push(frame))
+                Ok(MatchResult::empty_at(self.pos))
             }
         }
     }
