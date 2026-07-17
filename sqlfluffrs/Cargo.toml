@@ -58,6 +58,7 @@ verbose-debug = ["sqlfluffrs_parser/verbose-debug"]
 python = [
     "unicode",
     "pyo3",
+    "mimalloc",
     "sqlfluffrs_lexer/python",
     "sqlfluffrs_parser/python",
     "sqlfluffrs_rules/python",
@@ -70,6 +71,15 @@ hashbrown.workspace = true
 log.workspace = true
 pyo3 = { workspace = true, optional = true }
 serde_yaml_ng.workspace = true
+# Global allocator for the extension module. The parser is allocation-heavy
+# (per-frame Box<TableParseFrame> and Arc<MatchResult> churn dominate the DHAT
+# profile); glibc malloc's _int_malloc/_int_free bin-management path is ~17% of
+# all instructions on the TPC-DS parse benchmark, while mimalloc services those
+# same fixed-size allocations from a segregated free-list in far fewer
+# instructions. See PERF_LOG.md for the measurement. Optional + gated on the
+# `python` feature so a plain `cargo build --workspace` (CI, unit tests) does
+# not pull it; only the built extension installs the global allocator.
+mimalloc = { version = "0.1", optional = true }
 blake2 = "0.10.6"
 sqlfluffrs_types = { path = "sqlfluffrs_types" }
 sqlfluffrs_lexer = { path = "sqlfluffrs_lexer" }
