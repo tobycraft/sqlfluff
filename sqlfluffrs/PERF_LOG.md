@@ -245,3 +245,42 @@ consistent regression across every config, which contradicts its
 instruction-count rationale (HashMap removal) — worth re-benchmarking in
 isolation (ideally with `callgrind`, which isn't subject to this sandbox's
 wall-clock noise) before trusting either result.
+
+### Combined: all 10 branches merged into one
+
+All 20 commits from the 10 code branches above (i.e. everything except
+`docs/perf-log-campaign`, which carries no code) were cherry-picked in their
+original chronological order onto `sqlfluff/sqlfluff@main` (`589b1fb`) as
+`perf/combined-10`. Applied with only the one already-known conflict (the
+`43debb5` `*meta_type`-vs-`.clone()` line drift, resolved identically to its
+standalone branch) — no other conflicts across all 20 commits, i.e. the
+10 branches are compatible with each other as-is.
+
+Same methodology (adaptive sampling, steps of 5, stop at <1% relative SEM),
+same 6 configs, all converged:
+
+| config | merge-base | combined-10 | Δ |
+|---|---|---|---|
+| python tpch | 1703ms | 1561ms | **−8.4%** |
+| python tpcds | 18360ms | 17824ms | **−2.9%** |
+| rust-legacy tpch | 321ms | 185ms | **−42.5%** |
+| rust-legacy tpcds | 3100ms | 1754ms | **−43.4%** |
+| rust-native-ast tpch | 342ms | 154ms | **−55.0%** |
+| rust-native-ast tpcds | 3145ms | 1432ms | **−54.5%** |
+
+Both Rust paths are roughly halved — a bigger reduction than either a naive
+sum of the individual branches' % deltas (≈−35% for rust-legacy tpch) or a
+multiplicative compounding of them (≈−31%) would predict. The likely
+explanation: `fat-lto-codegen-units`'s whole-workspace LTO gets to inline
+across a hot path that the other 9 branches have already made much smaller/
+simpler, so its benefit scales with how much of that path they trimmed —
+a real positive interaction between changes, not measurement noise (the
+effect size here, 40-55%, dwarfs this sandbox's ~1-5% noise floor).
+
+Notably, the pure-Python parser path improves too (−8.4%/−2.9%), which no
+individual branch showed clearly on its own — `jinja-skip-positionmarker-
+slots`'s Python-side edits (`jinja.py`, `markers.py`, `keyword.py`,
+`fluffconfig.py`) plus the lexer/segment-construction fast paths
+(`lexer-segment-construction-fastpath`) touch code the pure-Python parser
+also runs through. Individually each looked like noise (±1-6%); stacked,
+the signal is clear.
