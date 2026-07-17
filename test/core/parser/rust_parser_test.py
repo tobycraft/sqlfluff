@@ -778,6 +778,61 @@ def _compare_rust_native_vs_legacy(sql, dialect="ansi", config_overrides=None):
         (";;;", "ansi"),
         ("SELECT 1   \n-- comment\n   ", "ansi"),
         ("/* c */ SELECT /* c2 */ 1 /* c3 */", "ansi"),
+        # Empty-bracket constructs: the most plausible grammar sites for
+        # zero-length matches, where the two builders' tolerances differ
+        # (legacy asserts in MatchResult.__post_init__; the fused builder's
+        # zero-length branch silently drops a matched_class). The Rust core
+        # currently never emits such shapes - these inputs keep proving it
+        # through user-observable behaviour.
+        ("SELECT count() FROM t", "ansi"),
+        ("INSERT INTO t () VALUES ()", "ansi"),
+        ("SELECT rank() OVER () FROM t", "ansi"),
+        ("WITH a AS () SELECT 1", "ansi"),
+        ("SELECT CAST(a AS ) FROM t", "ansi"),
+        ("VALUES ()", "ansi"),
+        ("SELECT ()", "ansi"),
+        ("SELECT * FROM ()", "ansi"),
+        ("CREATE TABLE t ()", "ansi"),
+        # Line-ending and unicode torture.
+        ("SELECT a,\r\n b\r\nFROM t\r\n", "ansi"),
+        ("SELECT 1\rFROM t", "ansi"),
+        ('SELECT "héllo", "日本語" FROM t', "ansi"),
+        ("SELECT '🔥💥' FROM t", "ansi"),
+        # Wide/repetitive structures (many trigger locations per node).
+        ("SELECT " + ", ".join(f"c{i}" for i in range(200)) + " FROM t", "ansi"),
+        ("SELECT 1;" * 100, "ansi"),
+        (" UNION ALL ".join(["SELECT 1"] * 50), "ansi"),
+        ("SELECT 1 WHERE x IN (" + ",".join(map(str, range(200))) + ")", "ansi"),
+        ("SELECT 1 WHERE x IN (" + ",".join(map(str, range(50))) + ",", "ansi"),
+        # Nested/unclosed constructs within the default depth guard.
+        ("SELECT " + "CASE WHEN 1 THEN " * 30 + "0" + " END" * 30, "ansi"),
+        ("SELECT " + "CASE WHEN 1 THEN " * 30 + "0", "ansi"),
+        # Token soup: bracket resolution and error recovery chaos.
+        ("+ - * / = < >", "ansi"),
+        ("()[]()[]", "ansi"),
+        ("([)](])([", "ansi"),
+        # Dialect-specific parse paths (batch separators, typed literals,
+        # stage references, unclosed dollar quotes, hints, lambdas).
+        ("SELECT 1\nGO\nSELECT 2\nGO", "tsql"),
+        ("GO GO GO", "tsql"),
+        ("SELECT STRUCT<a INT64>(1)", "bigquery"),
+        ("SELECT STRUCT<a INT64(1)", "bigquery"),
+        ("SELECT $1, $2 FROM @stage", "snowflake"),
+        ("SELECT $tag$unclosed", "postgres"),
+        ("DELIMITER //\nSELECT 1//", "mysql"),
+        ("SELECT list_transform([1,2], x -> x + 1)", "duckdb"),
+        ("SELECT /*+ BROADCAST(t) */ a FROM t", "sparksql"),
+        # Multi-statement files where only SOME statements are unparsable:
+        # stresses the root-level interleaving of parsed statements with
+        # UnparsableSegment wrapping.
+        ("SELECT 1;\nGARBAGE HERE;\nSELECT 2;\n", "ansi"),
+        ("SELECT 1;\nSELECT CASE;\nSELECT 2", "ansi"),
+        ("SELECT 1\nGO\nTOTALLY BAD )\nGO\nSELECT 2", "tsql"),
+        ("SELECT 1; SELECT STRUCT<a INT64(1); SELECT 2;", "bigquery"),
+        ("SELECT 1; SELECT 1 -} FROM t; SELECT 2;", "snowflake"),
+        ("SELECT 1 FROM dual; BAD BAD (; SELECT 2 FROM dual;", "oracle"),
+        ("SELECT 1; [[; SELECT 2;", "clickhouse"),
+        ("SELECT 1; (((; SELECT 2;", "redshift"),
     ],
     ids=lambda val: repr(val)[:40],
 )
@@ -791,6 +846,49 @@ def test__rust_parser__native_ast_strict_parity_edge_cases(sql, dialect):
     """
     native_result, legacy_result = _compare_rust_native_vs_legacy(sql, dialect)
     assert native_result == legacy_result
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+def test__rust_parser__native_ast_alternating_modes_shared_instance():
+    """Alternating build paths on ONE parser instance stays byte-stable.
+
+    Both paths share per-instance state (the _get_segment_class_by_name
+    lru_cache, the RsParser handle) and module-global state (the native_ast
+    flag). Parsing the same lexed segments repeatedly while flipping the flag
+    between parses must give the same tree every time - no cross-mode cache
+    pollution or state leakage.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer
+    from sqlfluff.core.parser.rust_parser import set_native_ast
+
+    config = FluffConfig(overrides={"dialect": "ansi"})
+    parser = RustParser(config=config)
+    lexer = Lexer(config=config)
+    for sql in (
+        "SELECT a FROM t",
+        "SELECT CASE",
+        "WITH x AS (SELECT 1) SELECT * FROM x",
+    ):
+        segments, _ = lexer.lex(sql)
+        results = []
+        for native in (False, True, False, True):
+            set_native_ast(native)
+            try:
+                tree = parser.parse(segments, fname="t.sql")
+                results.append(
+                    tree.to_tuple(
+                        code_only=False,
+                        show_raw=True,
+                        include_meta=True,
+                        include_position=True,
+                    )
+                )
+            except BaseException as err:
+                results.append(("exc", type(err).__name__, str(err)))
+            finally:
+                set_native_ast(False)
+        assert all(r == results[0] for r in results), sql
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
@@ -848,6 +946,21 @@ def test__rust_parser__native_ast_root_match_logging_parity(caplog):
         "{% set x = 1 %}",
         # Malformed rendered SQL from a templated source.
         "SELECT {{ col }} FROM",
+        # Malformed templates: unclosed blocks and Jinja syntax errors
+        # (templating violations, sometimes no tree at all).
+        "SELECT a {% if x %} FROM t",
+        "{% for i in range(3) %}SELECT {{ i }};",
+        "SELECT {{ 1 + }} FROM t",
+        "SELECT {{ undefined_var }} FROM t",
+        # Blocks that render to nothing at various tree positions.
+        "SELECT 1{% if true %}{% endif %}",
+        "{% if true %}{% endif %}",
+        # Escaped/raw template syntax surviving into the SQL.
+        "{% raw %}SELECT {{ not_a_var }}{% endraw %} FROM t",
+        "{{ '{%' }} SELECT 1",
+        # Macros and loops expanding to multi-statement SQL.
+        "{% macro m(x) %}{{ x }} + 1{% endmacro %}SELECT {{ m(2) }}",
+        "{% for i in range(3) %}SELECT {{ i }};{% endfor %}",
     ],
     ids=lambda sql: repr(sql)[:45],
 )
@@ -884,7 +997,10 @@ def test__rust_parser__native_ast_templated_parity(sql):
             parsed = Linter(config=config).parse_string(sql, fname="t.sql")
         finally:
             set_native_ast(False)
-        tree = parsed.tree
+        # A template that fails to render at all yields no parsed variants,
+        # and the .tree property asserts on that - treat it as tree=None
+        # (the violations then carry the templating error for comparison).
+        tree = parsed.tree if parsed.parsed_variants else None
         result = {
             "violations": [(type(v).__name__, str(v)) for v in parsed.violations],
             "tree": None,
