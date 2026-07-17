@@ -465,10 +465,7 @@ impl PyMatchResult {
 ///
 /// Shared by `RsMatchResult.flatten()` and `RsParser.parse_with_ast()`;
 /// see `flatten()`'s docstring for the tuple layout.
-fn flatten_match_result<'py>(
-    py: Python<'py>,
-    root: &MatchResult,
-) -> PyResult<Bound<'py, PyList>> {
+fn flatten_match_result<'py>(py: Python<'py>, root: &MatchResult) -> PyResult<Bound<'py, PyList>> {
     {
         use pyo3::types::{PyString, PyTuple};
         use sqlfluffrs_types::token::CaseFold;

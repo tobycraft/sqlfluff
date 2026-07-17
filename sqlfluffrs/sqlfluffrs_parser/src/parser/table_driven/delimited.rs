@@ -99,8 +99,10 @@ impl Parser<'_> {
         //    within the Delimited's own element candidates. By omitting them, we allow
         //    all element options to be tried before respecting the parent's termination rules.
 
-        // Terminators for Delimited-level checks (includes local)
-        let mut all_terminators: Vec<GrammarId> = filtered_local
+        // Terminators for Delimited-level checks (includes local).
+        // Collected straight into the frame's SmallVec shape - no
+        // intermediate Vec + SmallVec::from_vec round trip.
+        let mut all_terminators: SmallVec<[GrammarId; 12]> = filtered_local
             .into_iter()
             .chain(filtered_parent_terminators.iter().copied())
             .collect();
@@ -125,7 +127,7 @@ impl Parser<'_> {
 
         // Store local terminators for terminator checks at Delimited level
         // Move all_terminators into frame (no clone)
-        frame.table_terminators = SmallVec::from_vec(all_terminators);
+        frame.table_terminators = all_terminators;
 
         // Calculate max_idx with terminators (read from frame)
         let grammar_parse_mode = inst.parse_mode;

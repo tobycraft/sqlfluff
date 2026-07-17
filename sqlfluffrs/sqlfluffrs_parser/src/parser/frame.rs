@@ -184,7 +184,13 @@ pub struct SequenceState {
     /// parse_context.terminators. Children only see parent terminators, not the
     /// Sequence's local terminators. The Sequence uses the combined set (own + parent)
     /// only for its own trim_to_terminator / max_idx computation.
-    pub child_terminators: Vec<GrammarId>,
+    ///
+    /// `None` means the child set is identical to the frame's own
+    /// `table_terminators` (the common case: a Sequence with no local
+    /// terminators leaves the parent set in place) - read it through
+    /// `Parser::sequence_child_terminators`, which resolves the fallback.
+    /// This avoids a per-frame `Vec` copy of the parent terminators.
+    pub child_terminators: Option<Vec<GrammarId>>,
 }
 
 /// Working state for a `OneOf` frame (see [`FrameContext::OneOf`]).
