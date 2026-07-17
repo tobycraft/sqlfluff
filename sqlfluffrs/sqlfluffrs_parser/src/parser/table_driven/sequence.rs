@@ -48,10 +48,13 @@ impl Parser<'_> {
             .grammar_ctx
             .terminators(seq_grammar_id)
             .collect::<Vec<_>>();
-        let elements = self
-            .grammar_ctx
-            .children(seq_grammar_id)
-            .collect::<Vec<_>>();
+        // Borrow the children as a static-table slice rather than collecting
+        // into a per-frame Vec: the DHAT profile showed this collect as ~308k
+        // allocations across a TPC-DS pass. `children_ids_slice` returns a
+        // `&'a [GrammarId]` tied to the grammar tables (not to `&self`), so it
+        // stays valid across the `&mut self` calls below - the same borrow the
+        // WaitingForChild handler already relies on.
+        let elements: &[GrammarId] = self.grammar_ctx.children_ids_slice(seq_grammar_id);
 
         // Handle empty elements case - sequence with no elements should succeed immediately
         if elements.is_empty() {
@@ -125,7 +128,7 @@ impl Parser<'_> {
         frame.table_terminators = all_terminators;
 
         // Buffer any leading meta elements before creating first child
-        self.buffer_trailing_meta_elements(&mut frame, &elements);
+        self.buffer_trailing_meta_elements(&mut frame, elements);
 
         // Get updated current_element_idx after meta buffering
         let current_element_idx = {
