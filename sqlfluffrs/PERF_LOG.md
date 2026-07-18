@@ -334,3 +334,69 @@ were originally developed together):
 parser paths (pure-Python, rust-legacy, native-AST) after every build, plus
 the full `test/core/parser` suite (2587 passed).
 
+**Frame-cache findings** (measured with the new per-variant metrics and the
+`SQLFLUFF_RS_DISABLE_FRAME_CACHE=1` hook in `examples/time_tpc.rs`):
+- Disabling the frame cache outright is catastrophic despite its ~4% hit
+  rate: TPC-H suite pass 73.6ms → 546ms (7.4x), and TPC-DS exceeds the
+  parser iteration limit. The rare hits save whole-subtree reparses.
+- Per-variant, over all 121 fixtures: Ref 630,340 gets / 4,777 hits (0.76%),
+  OneOf 279,169 / 29,123 (10.4%), Delimited 15,475 / 1,588 (10.3%),
+  Bracketed 2,409 / 0. Scoping `is_frame_cacheable` to OneOf|Delimited
+  removes ~650k lookup+insert round trips per pass: pure-Rust TPC-DS suite
+  pass 858ms → 694ms (−19%) in `time_tpc` (glibc build). In the wheel the
+  win is smaller — mimalloc had already made the dropped allocations cheap —
+  but parity is byte-identical and the parser suite passes, so it stays.
+
+**PGO** (opt-in, via the new `sqlfluffrs/build_pgo.sh`; the committed
+release profile is unchanged): a profile-generate build, one TPC-H+TPC-DS
+parse pass through both Rust paths as the workload, `llvm-profdata merge`
+(use the rustup `llvm-tools` component so versions match rustc's LLVM —
+the distro tool is too old to read the profraw format), then a
+profile-use build. Worth roughly 5–10% wall on the Rust paths on top of
+everything else. Parity: byte-identical.
+
+**Wall-time results** (this sandbox, same adaptive-SEM methodology as the
+combined-10 section; "final" = all merges + trims + scoped cache):
+
+| config | before (combined-10) | final | final + PGO | Δ (PGO) |
+|---|---|---|---|---|
+| python tpch | 1994ms | — | 2055ms | ~flat (Rust-only changes) |
+| python tpcds | 22844ms | — | 22412ms | −1.9% |
+| rust-legacy tpch | 258.7ms | 216.8ms* | 182.9ms | **−29.3%** |
+| rust-legacy tpcds | 2952.1ms | 2262.2ms | 2240.5ms | **−24.1%** |
+| rust-native-ast tpch | 217.4ms | 153.4ms | 151.7ms | **−30.2%** |
+| rust-native-ast tpcds | 2212.8ms | 1641.5ms | 1587.6ms | **−28.3%** |
+
+(*) the non-PGO rust-legacy tpch cell was sampled during a noisy window
+(earlier identical-code runs measured 193.7ms); treat it as ~195ms.
+
+Pure-Rust parse only (`time_tpc`, glibc example build, no mimalloc/PGO):
+TPC-H suite 89.0ms → 71.9ms (−19%), TPC-DS 1033.6ms → 693.6ms (−33%).
+
+**Why this stops short of another halving**: the stage profile of the
+native-AST pipeline (SQLFLUFF_RS_PROFILE) after the merge is roughly
+rust_core 46-48%, Python tree build (`apply`) 23-29%, lexing 17-21%,
+render/config ~5%. The Rust parse itself is now only half the wall time, so
+Rust-side wins are diluted 2x, and the remaining Python-side stages are
+CPython-bound object construction (21k BaseSegments + 75k PositionMarkers
+per TPC-DS pass) that the fast paths above have already trimmed. The
+levers that would plausibly deliver the rest, in rough order:
+- Build the leaf/tree BaseSegments in Rust (extend `parse_with_ast` to
+  produce the Python objects directly, or make `_rs_tree` the primary tree
+  and BaseSegment a lazy façade) — attacks the 25% `apply` stage.
+- Fuse lexing into the same PyO3 call for the native path (skip Python
+  RawSegment construction for tokens that the arena already carries) —
+  attacks the ~19% lex stage.
+- Callgrind-driven micro-work on the remaining rust_core half.
+
+**Gotchas added this session**:
+- `examples/*` binaries do NOT get mimalloc (it's gated on the root
+  crate's `python` feature), so `time_tpc` deltas overweight allocator
+  effects relative to the wheel.
+- The workspace release profile sets `strip = true`; for symbolized
+  profiling/debugging build with `CARGO_PROFILE_RELEASE_DEBUG=true
+  CARGO_PROFILE_RELEASE_STRIP=false`.
+- The `verbose-debug` feature of `sqlfluffrs_parser` currently fails to
+  compile (borrow error in a debug-only block in `core.rs`,
+  `while let Some(tok) = self.peek()` + `self.bump()`); fix before relying
+  on it for tracing.
