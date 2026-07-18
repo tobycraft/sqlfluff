@@ -451,3 +451,20 @@ fixtures matter here.
   all-bytes.
 - The seg-data boundary tuple is now 16 elements; the Python fast loop
   unpacks positionally.
+**Final configuration + PGO** (one `build_pgo.sh` cycle over the final
+code; parity byte-identical):
+
+| config | combined-10 baseline | final + PGO | Δ cumulative |
+|---|---|---|---|
+| python tpch | 1994ms | 1715ms | **−14%** |
+| python tpcds | 22844ms | 19053ms | **−17%** |
+| rust-legacy tpch | 258.7ms | 149.0ms | **−42.4%** |
+| rust-legacy tpcds | 2952.1ms | 1696.5ms | **−42.5%** |
+| rust-native-ast tpch | 217.4ms | 126.3ms | **−41.9%** |
+| rust-native-ast tpcds | 2212.8ms | 1204.5ms | **−45.6%** |
+
+With the parser-pass merges and the lexer pass stacked, the Rust-path
+benchmarks sit at −42% to −46% vs where this branch started - close to the
+halving target. The dominant remaining stage is the Python-side BaseSegment
+construction (`apply`, plus the per-token segment loop), which the "next
+levers" list above still covers.
