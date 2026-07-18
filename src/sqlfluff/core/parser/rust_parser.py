@@ -299,32 +299,41 @@ try:
                     try:
                         if _prof is not None:
                             _ts = time.perf_counter()
-                        flat, rs_tree = self._rs_parser.parse_with_ast(
+                        # Fully fused: the BaseSegment tuple is built from
+                        # Rust (a port of _apply_flat_match's build()) in the
+                        # same call as the parse - no flat encoding, no
+                        # Python-side tree walk. _apply_flat_match remains as
+                        # the reference implementation (and for parity tests).
+                        (
+                            _matched,
+                            _saw_unparsable,
+                            _m_start,
+                            _m_stop,
+                            _has_inserts,
+                            _n_nodes,
+                            _build_secs,
+                            rs_tree,
+                        ) = self._rs_parser.parse_with_native_segments(
                             tokens,
-                            leading=leading_tokens,
-                            trailing=trailing_tokens,
+                            tuple(code_segments),
+                            self._native_build_helpers(),
+                            leading_tokens,
+                            trailing_tokens,
                         )
                         if _prof is not None:
-                            _prof["rust_core"] = time.perf_counter() - _ts
+                            _elapsed = time.perf_counter() - _ts
+                            # The segment build happens inside the same PyO3
+                            # call; split it out so the stage profile keeps
+                            # the rust_core/apply distinction.
+                            _prof["rust_core"] = _elapsed - _build_secs
+                            _prof["apply"] = _build_secs
                     except RsParseError as e:
                         raise SQLParseError.from_rs_parse_error(
                             e, code_segments
                         ) from e
 
-                    if _prof is not None:
-                        _ts = time.perf_counter()
-                    _matched, _saw_unparsable = self._apply_flat_match(
-                        flat, code_segments, parse_context
-                    )
-                    if _prof is not None:
-                        _prof["apply"] = time.perf_counter() - _ts
-
-                    # matched_slice/truthiness come from the root node of the
-                    # flat encoding (mirrors MatchResult.matched_slice /
-                    # __bool__): flat[0] is (start, stop, ..., inserts, ...).
-                    _root = flat[0]
-                    _m_start, _m_stop = _root[0], _root[1]
-                    _match_truthy = _m_stop > _m_start or bool(_root[4])
+                    parse_context.increment_parse_nodes(_n_nodes)
+                    _match_truthy = _m_stop > _m_start or _has_inserts
                 else:
                     try:
                         if _prof is not None:
@@ -492,6 +501,37 @@ try:
                 raise err
 
         @functools.lru_cache(maxsize=128)
+        def _native_build_helpers(self) -> tuple:
+            """Helper tuple for RsParser.parse_with_native_segments.
+
+            Built once per parser instance: (class cache dict, class
+            resolver, BaseSegment.from_result_segments.__func__, make_meta,
+            (Indent, ImplicitIndent, Dedent), str.upper, str.lower). The
+            class cache maps segment class names to None (grammar name) or
+            (class, uses_stock_from_result_segments) and is populated from
+            the Rust side.
+            """
+            helpers = getattr(self, "_native_helpers_cache", None)
+            if helpers is None:
+                if self._META_FAST:
+                    make_meta = self._make_meta
+                else:  # pragma: no cover
+
+                    def make_meta(meta_cls, segs, idx):
+                        return meta_cls(pos_marker=_get_point_pos_at_idx(segs, idx))
+
+                helpers = (
+                    {},
+                    self._get_segment_class_by_name,
+                    _BASE_FRS,
+                    make_meta,
+                    (Indent, ImplicitIndent, Dedent),
+                    str.upper,
+                    str.lower,
+                )
+                self._native_helpers_cache = helpers
+            return helpers
+
         def _get_segment_class_by_name(
             self, segment_name: str
         ) -> Optional[type[BaseSegment]]:

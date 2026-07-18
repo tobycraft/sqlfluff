@@ -590,6 +590,261 @@ fn flatten_match_result<'py>(py: Python<'py>, root: &MatchResult) -> PyResult<Bo
     }
 }
 
+/// Helper objects for building the Python `BaseSegment` tree from Rust
+/// (see `PyParser::parse_with_native_segments`). All fields are Python
+/// objects owned by the calling frame.
+struct SegmentBuildCtx<'py> {
+    /// The code-window `RawSegment`s, index-aligned with the match slices.
+    code_segments: Bound<'py, pyo3::types::PyTuple>,
+    /// Persistent name -> (class | None, is_stock_from_result_segments) cache.
+    class_cache: Bound<'py, PyDict>,
+    /// `RustParser._get_segment_class_by_name` (lru-cached resolver).
+    class_resolver: Bound<'py, PyAny>,
+    /// `BaseSegment.from_result_segments.__func__` for stock-builder checks.
+    base_frs: Bound<'py, PyAny>,
+    /// `RustParser._make_meta(meta_cls, segments, idx)`.
+    make_meta: Bound<'py, PyAny>,
+    /// (Indent, ImplicitIndent, Dedent) classes, indexed by meta code.
+    meta_classes: [Bound<'py, PyAny>; 3],
+    /// `str.upper` / `str.lower` for the casefold kwarg.
+    upper: Bound<'py, PyAny>,
+    lower: Bound<'py, PyAny>,
+    /// Interned Python strings for repeated kwarg values.
+    interned: std::cell::RefCell<HashMap<String, Py<pyo3::types::PyString>>>,
+    node_count: std::cell::Cell<usize>,
+    saw_unparsable: std::cell::Cell<bool>,
+}
+
+impl<'py> SegmentBuildCtx<'py> {
+    fn intern(&self, py: Python<'py>, s: &str) -> Py<pyo3::types::PyString> {
+        let mut map = self.interned.borrow_mut();
+        if let Some(v) = map.get(s) {
+            return v.clone_ref(py);
+        }
+        let v = pyo3::types::PyString::new(py, s).unbind();
+        map.insert(s.to_string(), v.clone_ref(py));
+        v
+    }
+
+    /// Resolve a segment class name to `(class, is_stock)` where `is_stock`
+    /// means the class uses the stock `BaseSegment.from_result_segments`
+    /// (letting us call the constructor directly, saving a Python frame -
+    /// mirrors `_apply_flat_match`'s `_BASE_FRS` check). `Ok(None)` mirrors
+    /// the resolver returning `None` for grammar names.
+    fn resolve_class(
+        &self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<Option<(Bound<'py, PyAny>, bool)>> {
+        if let Some(entry) = self.class_cache.get_item(name)? {
+            if entry.is_none() {
+                return Ok(None);
+            }
+            let tuple = entry.cast::<pyo3::types::PyTuple>()?;
+            return Ok(Some((tuple.get_item(0)?, tuple.get_item(1)?.extract()?)));
+        }
+        let cls = self.class_resolver.call1((name,))?;
+        if cls.is_none() {
+            self.class_cache.set_item(name, py.None())?;
+            return Ok(None);
+        }
+        let is_stock = cls
+            .getattr(pyo3::intern!(py, "from_result_segments"))?
+            .getattr(pyo3::intern!(py, "__func__"))?
+            .is(&self.base_frs);
+        self.class_cache
+            .set_item(name, (cls.clone(), is_stock).into_pyobject(py)?)?;
+        Ok(Some((cls, is_stock)))
+    }
+
+    fn make_meta_at(&self, code: u8, idx: usize) -> PyResult<Bound<'py, PyAny>> {
+        self.make_meta
+            .call1((&self.meta_classes[code as usize], &self.code_segments, idx))
+    }
+}
+
+const fn meta_code(seg_type: &MetaSegment) -> u8 {
+    match seg_type {
+        MetaSegment::Indent { is_implicit: false } => 0,
+        MetaSegment::Indent { is_implicit: true } => 1,
+        MetaSegment::Dedent { .. } => 2,
+    }
+}
+
+/// Build the Python `BaseSegment` tuple for one match node, pushing the
+/// results into `out` (splicing class-less nodes into their parent, exactly
+/// like the Python reference `_apply_flat_match.build()` - this function is
+/// a line-for-line port of it, and MUST stay behaviourally identical).
+fn build_py_segments<'py>(
+    py: Python<'py>,
+    m: &MatchResult,
+    ctx: &SegmentBuildCtx<'py>,
+    out: &mut Vec<Py<PyAny>>,
+) -> PyResult<()> {
+    use pyo3::exceptions::{PyAssertionError, PyValueError};
+
+    let start = m.matched_slice.start;
+    let stop = m.matched_slice.end;
+
+    // Position-sorted inserts and children (usually already sorted).
+    let mut inserts: Vec<(usize, u8)> = m
+        .insert_segments
+        .iter()
+        .map(|(idx, seg_type)| (*idx, meta_code(seg_type)))
+        .collect();
+    inserts.sort_by_key(|(idx, _)| *idx);
+    let mut children: Vec<&MatchResult> = m.child_matches.iter().map(|c| &**c).collect();
+    children.sort_by_key(|c| c.matched_slice.start);
+
+    // Zero-length match: only meta inserts are valid. NOTE: mirrors the
+    // Python reference exactly - this branch returns WITHOUT wrapping in
+    // the matched class (build() early-returns before the class handling).
+    if start == stop {
+        for (idx, code) in &inserts {
+            if *idx != start {
+                return Err(PyAssertionError::new_err(format!(
+                    "Tried to insert @{} outside of matched slice {:?}",
+                    idx,
+                    (start, stop)
+                )));
+            }
+            ctx.node_count.set(ctx.node_count.get() + 1);
+            out.push(ctx.make_meta_at(*code, *idx)?.unbind());
+        }
+        return Ok(());
+    }
+
+    let mut local: Vec<Py<PyAny>> = Vec::new();
+    let mut max_idx = start;
+    let mut ins_i = 0;
+
+    let mut gap_fill =
+        |local: &mut Vec<Py<PyAny>>, max_idx: &mut usize, idx: usize| -> PyResult<()> {
+            if idx > *max_idx {
+                for i in *max_idx..idx {
+                    local.push(ctx.code_segments.get_item(i)?.unbind());
+                }
+                *max_idx = idx;
+            } else if idx < *max_idx {
+                return Err(PyValueError::new_err(
+                    "Segment skip ahead error. An outer match contains overlapping \
+                 child matches. This MatchResult was wrongly constructed.",
+                ));
+            }
+            Ok(())
+        };
+
+    for child in &children {
+        let child_start = child.matched_slice.start;
+        // Metas at or before this child come first.
+        while ins_i < inserts.len() && inserts[ins_i].0 <= child_start {
+            let (idx, code) = inserts[ins_i];
+            ins_i += 1;
+            gap_fill(&mut local, &mut max_idx, idx)?;
+            local.push(ctx.make_meta_at(code, idx)?.unbind());
+        }
+        gap_fill(&mut local, &mut max_idx, child_start)?;
+        build_py_segments(py, child, ctx, &mut local)?;
+        max_idx = child.matched_slice.end;
+    }
+    // Any remaining metas after the last child.
+    while ins_i < inserts.len() {
+        let (idx, code) = inserts[ins_i];
+        ins_i += 1;
+        gap_fill(&mut local, &mut max_idx, idx)?;
+        local.push(ctx.make_meta_at(code, idx)?.unbind());
+    }
+    // Anything left after the last trigger.
+    if max_idx < stop {
+        for i in max_idx..stop {
+            local.push(ctx.code_segments.get_item(i)?.unbind());
+        }
+    }
+
+    finish_node(py, m, ctx, local, out)
+}
+
+/// Wrap `local` in the node's matched class (when it has one and the class
+/// resolves), or splice it into the parent. Mirrors the tail of `build()`.
+fn finish_node<'py>(
+    py: Python<'py>,
+    m: &MatchResult,
+    ctx: &SegmentBuildCtx<'py>,
+    local: Vec<Py<PyAny>>,
+    out: &mut Vec<Py<PyAny>>,
+) -> PyResult<()> {
+    use pyo3::types::PyTuple;
+    use sqlfluffrs_types::token::CaseFold;
+
+    let Some(mc) = m.matched_class.as_ref() else {
+        out.extend(local);
+        return Ok(());
+    };
+    let Some((cls, is_stock)) = ctx.resolve_class(py, mc.class_name.as_ref())? else {
+        out.extend(local);
+        return Ok(());
+    };
+
+    if mc.class_name.as_ref() == "UnparsableSegment" {
+        ctx.saw_unparsable.set(true);
+    }
+
+    let result_segments = PyTuple::new(py, local)?;
+    let sk = &mc.segment_kwargs;
+    let kwargs = PyDict::new(py);
+    if let Some(instance_types) = sk.instance_types.as_ref().filter(|v| !v.is_empty()) {
+        let tup = PyTuple::new(py, instance_types.iter().map(|t| ctx.intern(py, t)))?;
+        kwargs.set_item(pyo3::intern!(py, "instance_types"), tup)?;
+    }
+    if let Some((msg, _)) = sk.parse_error.as_ref() {
+        kwargs.set_item(pyo3::intern!(py, "expected"), msg)?;
+    }
+    if let Some(trim_chars) = sk.trim_chars.as_ref().filter(|v| !v.is_empty()) {
+        let tup = PyTuple::new(py, trim_chars.iter().map(|t| ctx.intern(py, t)))?;
+        kwargs.set_item(pyo3::intern!(py, "trim_chars"), tup)?;
+    }
+    match sk.casefold {
+        CaseFold::None => {}
+        CaseFold::Upper => kwargs.set_item(pyo3::intern!(py, "casefold"), &ctx.upper)?,
+        CaseFold::Lower => kwargs.set_item(pyo3::intern!(py, "casefold"), &ctx.lower)?,
+    }
+    if let Some((pattern, group)) = sk.quoted_value.as_ref() {
+        let py_group: Py<PyAny> = match group {
+            sqlfluffrs_types::regex::RegexModeGroup::Index(idx) => {
+                idx.into_pyobject(py)?.unbind().into()
+            }
+            sqlfluffrs_types::regex::RegexModeGroup::Name(name) => {
+                pyo3::types::PyString::new(py, name).unbind().into()
+            }
+        };
+        kwargs.set_item(
+            pyo3::intern!(py, "quoted_value"),
+            (pattern.as_str(), py_group),
+        )?;
+    }
+    if let Some((a, b)) = sk.escape_replacement.as_ref() {
+        kwargs.set_item(
+            pyo3::intern!(py, "escape_replacements"),
+            vec![(a.as_str(), b.as_str())],
+        )?;
+    }
+
+    let new_seg = if is_stock {
+        // Direct constructor call for classes on the stock
+        // from_result_segments (one Python frame per node saved).
+        kwargs.set_item(pyo3::intern!(py, "segments"), result_segments)?;
+        cls.call((), Some(&kwargs))?
+    } else {
+        cls.call_method1(
+            pyo3::intern!(py, "from_result_segments"),
+            (result_segments, kwargs),
+        )?
+    };
+    ctx.node_count.set(ctx.node_count.get() + 1);
+    out.push(new_seg.unbind());
+    Ok(())
+}
+
 /// Python-wrapped Parser
 #[pyclass(name = "RsParser", module = "sqlfluffrs")]
 pub struct PyParser {
@@ -731,6 +986,104 @@ impl PyParser {
         .ok();
 
         Ok((flat, tree))
+    }
+
+    /// Fused parse + Python-segment-tree build: parse the tokens, then build
+    /// the `BaseSegment` tuple for the match directly from Rust (a port of
+    /// `RustParser._apply_flat_match`), plus the Rust arena tree.
+    ///
+    /// `helpers` is the 7-tuple built by `RustParser._native_build_helpers`:
+    /// (class_cache dict, class resolver, BaseSegment.from_result_segments
+    /// .__func__, _make_meta, (Indent, ImplicitIndent, Dedent), str.upper,
+    /// str.lower).
+    ///
+    /// Returns `(matched_segments, saw_unparsable, m_start, m_stop,
+    /// has_inserts, node_count, build_secs, tree)` where `build_secs` is the
+    /// wall time of the segment build (for the SQLFLUFF_RS_PROFILE stage
+    /// split) and `node_count` feeds `parse_context.increment_parse_nodes`.
+    #[pyo3(signature = (tokens, code_segments, helpers, leading, trailing))]
+    #[allow(clippy::type_complexity)]
+    pub fn parse_with_native_segments<'py>(
+        &self,
+        py: Python<'py>,
+        tokens: Vec<PyToken>,
+        code_segments: Bound<'py, pyo3::types::PyTuple>,
+        helpers: Bound<'py, pyo3::types::PyTuple>,
+        leading: Vec<PyToken>,
+        trailing: Vec<PyToken>,
+    ) -> PyResult<(
+        Bound<'py, pyo3::types::PyTuple>,
+        bool,
+        usize,
+        usize,
+        bool,
+        usize,
+        f64,
+        Option<super::arena_py::PyTree>,
+    )> {
+        // Convert PyToken to internal Token (once).
+        let mut rust_tokens: Vec<Token> = tokens.into_iter().map(|t| t.into()).collect();
+        compute_bracket_pairs(&mut rust_tokens);
+
+        let mut parser = Parser::new_with_max_parse_depth(
+            &rust_tokens,
+            self.dialect,
+            self.indent_config.clone(),
+            self.max_parse_depth,
+        )
+        .with_parser_limits(self.max_parser_iterations, self.parser_warn_threshold)
+        .with_node_limit(self.max_parse_nodes);
+
+        let match_result = parser.call_rule_as_root().map_err(parse_error_to_pyerr)?;
+
+        let build_start = std::time::Instant::now();
+        let ctx = SegmentBuildCtx {
+            code_segments,
+            class_cache: helpers.get_item(0)?.cast_into::<PyDict>()?,
+            class_resolver: helpers.get_item(1)?,
+            base_frs: helpers.get_item(2)?,
+            make_meta: helpers.get_item(3)?,
+            meta_classes: {
+                let metas = helpers.get_item(4)?;
+                [metas.get_item(0)?, metas.get_item(1)?, metas.get_item(2)?]
+            },
+            upper: helpers.get_item(5)?,
+            lower: helpers.get_item(6)?,
+            interned: std::cell::RefCell::new(HashMap::new()),
+            node_count: std::cell::Cell::new(0),
+            saw_unparsable: std::cell::Cell::new(false),
+        };
+        let mut matched: Vec<Py<PyAny>> = Vec::new();
+        build_py_segments(py, &match_result, &ctx, &mut matched)?;
+        let matched_tuple = pyo3::types::PyTuple::new(py, matched)?;
+        let build_secs = build_start.elapsed().as_secs_f64();
+        // apply_as_root consumes the match; capture what the return needs.
+        let (m_start, m_stop) = (
+            match_result.matched_slice.start,
+            match_result.matched_slice.end,
+        );
+        let has_inserts = !match_result.insert_segments.is_empty();
+
+        let rust_leading: Vec<Token> = leading.into_iter().map(|t| t.into()).collect();
+        let rust_trailing: Vec<Token> = trailing.into_iter().map(|t| t.into()).collect();
+        // Tree construction panics indicate a malformed match result; they
+        // were non-fatal in the two-call flow, so keep them non-fatal here.
+        let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let node = match_result.apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
+            super::arena_py::PyTree::new(super::arena::Arena::from_node(node))
+        }))
+        .ok();
+
+        Ok((
+            matched_tuple,
+            ctx.saw_unparsable.get(),
+            m_start,
+            m_stop,
+            has_inserts,
+            ctx.node_count.get(),
+            build_secs,
+            tree,
+        ))
     }
 
     /// Parse SQL from tokens and return MatchResult along with parser statistics.

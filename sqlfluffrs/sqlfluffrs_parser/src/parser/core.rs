@@ -158,7 +158,10 @@ impl ParserMetrics {
             "terminal_fast_path_misses".to_string(),
             self.terminal_fast_path_misses.get(),
         );
-        for (i, name) in ["ref", "oneof", "delimited", "bracketed"].iter().enumerate() {
+        for (i, name) in ["ref", "oneof", "delimited", "bracketed"]
+            .iter()
+            .enumerate()
+        {
             m.insert(
                 format!("cache_gets_{name}"),
                 self.cache_gets_by_variant[i].get(),

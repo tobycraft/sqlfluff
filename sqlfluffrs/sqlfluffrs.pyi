@@ -279,6 +279,14 @@ class RsParser:
         leading: List[RsToken] = ...,
         trailing: List[RsToken] = ...,
     ) -> tuple[List[tuple], Optional["RsTree"]]: ...
+    def parse_with_native_segments(
+        self,
+        tokens: List[RsToken],
+        code_segments: tuple,
+        helpers: tuple,
+        leading: List[RsToken],
+        trailing: List[RsToken],
+    ) -> tuple[tuple, bool, int, int, bool, int, float, Optional["RsTree"]]: ...
 
 def cp01_violations(
     tree: RsTree,

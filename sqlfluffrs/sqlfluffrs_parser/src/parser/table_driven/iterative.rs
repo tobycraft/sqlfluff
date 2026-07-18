@@ -1,8 +1,8 @@
 #[cfg(feature = "verbose-debug")]
 use crate::vdebug;
 use sqlfluffrs_types::GrammarId;
-use sqlfluffrs_types::ParseMode;
 use sqlfluffrs_types::GrammarVariant;
+use sqlfluffrs_types::ParseMode;
 use std::sync::Arc;
 
 use crate::parser::{
@@ -740,7 +740,6 @@ impl Parser<'_> {
     /// The cacheable-set and the `max_idx` formula both live in `parity.rs` and are reached
     /// only through this one method, so the store key and the lookup key cannot drift —
     /// see the optimization preconditions in `ENGINE.md` (a drift here would silently corrupt the cache).
-    #[inline]
     /// Metrics slot for a cacheable variant (see `ParserMetrics::cache_gets_by_variant`).
     #[inline]
     fn cache_variant_slot(variant: GrammarVariant) -> usize {
@@ -752,6 +751,7 @@ impl Parser<'_> {
         }
     }
 
+    #[inline]
     fn frame_cache_key(
         &mut self,
         frame: &TableParseFrame,
@@ -859,7 +859,8 @@ impl Parser<'_> {
             // drift). `None` means this grammar isn't cached.
             if let Some(cache_key) = self.frame_cache_key(&frame)? {
                 frame.cache_key = Some(cache_key);
-                let variant_slot = Self::cache_variant_slot(self.grammar_ctx.variant(frame.grammar_id));
+                let variant_slot =
+                    Self::cache_variant_slot(self.grammar_ctx.variant(frame.grammar_id));
                 self.metrics.cache_gets_by_variant[variant_slot]
                     .set(self.metrics.cache_gets_by_variant[variant_slot].get() + 1);
                 if let Some((match_result, end_pos)) = self.table_cache.get(&cache_key) {
