@@ -20,6 +20,16 @@ use sqlfluffrs_lexer::{LexInput, Lexer};
 use sqlfluffrs_parser::parser::Parser;
 use sqlfluffrs_types::Token;
 
+/// Honour SQLFLUFF_RS_DISABLE_FRAME_CACHE=1 so cache-on/off A-B runs need no
+/// rebuild - purely an experiment hook for this harness.
+fn new_parser<'a>(tokens: &'a [Token]) -> Parser<'a> {
+    let mut p = Parser::new(tokens, Dialect::Ansi, hashbrown::HashMap::new());
+    if std::env::var_os("SQLFLUFF_RS_DISABLE_FRAME_CACHE").is_some_and(|v| v == "1") {
+        p.set_cache_enabled(false);
+    }
+    p
+}
+
 const N_WARMUP: usize = 1;
 const N_TIMED: usize = 5;
 
@@ -196,13 +206,13 @@ fn lex(path: &Path) -> (Vec<Token>, usize) {
 
 fn timed_runs(tokens: &[Token]) -> Vec<RunStats> {
     for _ in 0..N_WARMUP {
-        let mut p = Parser::new(tokens, Dialect::Ansi, hashbrown::HashMap::new());
+        let mut p = new_parser(tokens);
         std::hint::black_box(p.call_rule_as_root().expect("Parse failed"));
     }
     (0..N_TIMED)
         .map(|_| {
             let t0 = Instant::now();
-            let mut p = Parser::new(tokens, Dialect::Ansi, hashbrown::HashMap::new());
+            let mut p = new_parser(tokens);
             p.call_rule_as_root().expect("Parse failed");
             RunStats::capture(t0.elapsed(), &p)
         })
@@ -212,7 +222,7 @@ fn timed_runs(tokens: &[Token]) -> Vec<RunStats> {
 fn timed_suite_runs(all_tokens: &[Vec<Token>]) -> Vec<RunStats> {
     for _ in 0..N_WARMUP {
         for tokens in all_tokens {
-            let mut p = Parser::new(tokens, Dialect::Ansi, hashbrown::HashMap::new());
+            let mut p = new_parser(tokens);
             std::hint::black_box(p.call_rule_as_root().expect("Parse failed"));
         }
     }
@@ -235,7 +245,7 @@ fn timed_suite_runs(all_tokens: &[Vec<Token>]) -> Vec<RunStats> {
             let mut fast_path_hits = 0;
             let mut fast_path_misses = 0;
             for tokens in all_tokens {
-                let mut p = Parser::new(tokens, Dialect::Ansi, hashbrown::HashMap::new());
+                let mut p = new_parser(tokens);
                 p.call_rule_as_root().expect("Parse failed");
                 let (h, miss, _) = p.cache_stats();
                 cache_hits += h;
