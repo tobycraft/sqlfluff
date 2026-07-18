@@ -55,6 +55,8 @@ pub struct LexMatcher {
     pub escape_replacements: Option<(String, String)>,
     pub casefold: CaseFold,
     pub kwarg_type: Option<String>,
+    /// See [`FirstByteSet`]; computed once at construction.
+    pub first_bytes: FirstByteSet,
 }
 
 /// Grouped optional parameters shared by [`LexMatcher::string_lexer`],
@@ -71,6 +73,117 @@ pub struct LexMatcherConfig {
     pub kwarg_type: Option<String>,
 }
 
+/// 256-bit set of bytes a [`LexMatcher`] could possibly match at the start
+/// of its input. Used as a cheap gate in [`LexMatcher::scan_match_into`]
+/// before touching the regex engine: the matcher walk visits every matcher
+/// in order for every token position, and most matchers cannot possibly
+/// match at most positions (a comma matcher at the start of a keyword, the
+/// whitespace regex at the start of an identifier, ...).
+///
+/// The set is a conservative OVER-approximation - a byte being present only
+/// means the matcher must be consulted, never that it will match - so
+/// gating on it cannot change which matcher wins.
+#[derive(Debug, Clone, Copy)]
+pub struct FirstByteSet([u64; 4]);
+
+impl FirstByteSet {
+    /// Every byte possible: used whenever the pattern cannot be analysed.
+    const ALL: FirstByteSet = FirstByteSet([u64::MAX; 4]);
+
+    fn empty() -> Self {
+        FirstByteSet([0; 4])
+    }
+
+    fn insert(&mut self, b: u8) {
+        self.0[(b >> 6) as usize] |= 1u64 << (b & 63);
+    }
+
+    fn insert_range(&mut self, lo: u8, hi: u8) {
+        for b in lo..=hi {
+            self.insert(b);
+        }
+    }
+
+    #[inline]
+    pub fn contains(&self, b: u8) -> bool {
+        self.0[(b >> 6) as usize] & (1u64 << (b & 63)) != 0
+    }
+
+    /// Derive the set for a regex pattern, or `ALL` when the pattern cannot
+    /// be parsed (e.g. fancy-regex syntax) or could match the empty string.
+    fn for_regex_pattern(pattern: &str) -> Self {
+        let Ok(hir) = regex_syntax::ParserBuilder::new().build().parse(pattern) else {
+            return Self::ALL;
+        };
+        let mut set = Self::empty();
+        if Self::collect_hir(&hir, &mut set) {
+            // The whole pattern can match empty: any byte may follow.
+            return Self::ALL;
+        }
+        set
+    }
+
+    /// Add the possible first bytes of `hir` to `set`; returns whether `hir`
+    /// can match the empty string (so a following concat element's first
+    /// bytes are also reachable).
+    fn collect_hir(hir: &regex_syntax::hir::Hir, set: &mut FirstByteSet) -> bool {
+        use regex_syntax::hir::{Class, HirKind};
+        match hir.kind() {
+            HirKind::Empty => true,
+            HirKind::Literal(lit) => {
+                if let Some(&b) = lit.0.first() {
+                    set.insert(b);
+                    false
+                } else {
+                    true
+                }
+            }
+            HirKind::Class(Class::Unicode(cls)) => {
+                for range in cls.ranges() {
+                    let lo = range.start() as u32;
+                    let hi = range.end() as u32;
+                    if lo <= 0x7F {
+                        set.insert_range(lo as u8, hi.min(0x7F) as u8);
+                    }
+                    if hi > 0x7F {
+                        // Any non-ASCII char: over-approximate with every
+                        // possible UTF-8 lead byte.
+                        set.insert_range(0x80, 0xFF);
+                    }
+                }
+                false
+            }
+            HirKind::Class(Class::Bytes(cls)) => {
+                for range in cls.ranges() {
+                    set.insert_range(range.start(), range.end());
+                }
+                false
+            }
+            HirKind::Look(_) => true,
+            HirKind::Repetition(rep) => {
+                let sub_empty = Self::collect_hir(&rep.sub, set);
+                rep.min == 0 || sub_empty
+            }
+            HirKind::Capture(cap) => Self::collect_hir(&cap.sub, set),
+            HirKind::Concat(items) => {
+                for item in items {
+                    if !Self::collect_hir(item, set) {
+                        return false;
+                    }
+                }
+                true
+            }
+            HirKind::Alternation(items) => {
+                let mut any_empty = false;
+                for item in items {
+                    any_empty |= Self::collect_hir(item, set);
+                }
+                any_empty
+            }
+        }
+    }
+}
+
 impl Display for LexMatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<{}: {}>", self.mode, self.name)
@@ -85,6 +198,14 @@ impl LexMatcher {
         token_class_func: TokenGenerator,
         config: LexMatcherConfig,
     ) -> Self {
+        let first_bytes = {
+            let mut set = FirstByteSet::empty();
+            match template.as_bytes().first() {
+                Some(&b) => set.insert(b),
+                None => set = FirstByteSet::ALL,
+            }
+            set
+        };
         Self {
             // dialect,
             name: name.to_string(),
@@ -98,6 +219,7 @@ impl LexMatcher {
             escape_replacements: config.escape_replacements,
             casefold: config.casefold,
             kwarg_type: config.kwarg_type,
+            first_bytes,
         }
     }
 
@@ -126,6 +248,13 @@ impl LexMatcher {
                 }
             },
         };
+        // Function-mode fallbacks can match anything; regex modes get the
+        // conservative pattern-derived set (fancy-regex patterns fail
+        // regex-syntax parsing and also fall back to ALL inside).
+        let first_bytes = match &mode {
+            LexerMode::Function(_) => FirstByteSet::ALL,
+            _ => FirstByteSet::for_regex_pattern(pattern),
+        };
 
         Self {
             // dialect,
@@ -140,6 +269,7 @@ impl LexMatcher {
             escape_replacements: config.escape_replacements,
             casefold: config.casefold,
             kwarg_type: config.kwarg_type,
+            first_bytes,
         }
     }
 
@@ -185,10 +315,23 @@ impl LexMatcher {
         )
     }
 
-    pub fn scan_match<'a>(&'a self, input: &'a str) -> Option<(Vec<LexedElement<'a>>, usize)> {
-        // let t = Instant::now();
+    /// Match at the start of `input`, appending the resulting element(s) to
+    /// `out` and returning the matched byte length. Writing into the caller's
+    /// buffer avoids a `Vec` allocation per matched token (the common case is
+    /// exactly one element - see `subdivide_into`).
+    pub fn scan_match_into<'a>(
+        &'a self,
+        input: &'a str,
+        out: &mut Vec<LexedElement<'a>>,
+    ) -> Option<usize> {
         if input.is_empty() {
             panic!("Unexpected empty string!");
+        }
+
+        // First-byte gate (see FirstByteSet): skip the regex/starts_with
+        // machinery entirely when this matcher provably cannot match here.
+        if !self.first_bytes.contains(input.as_bytes()[0]) {
+            return None;
         }
 
         // Match based on the mode
@@ -220,11 +363,18 @@ impl LexMatcher {
         // Handle subdivision and trimming
         if let Some(matched) = matched {
             let len = matched.raw.len();
-            let elements = self.subdivide(matched);
-            Some((elements, len))
+            self.subdivide_into(matched, out);
+            Some(len)
         } else {
             None
         }
+    }
+
+    /// Compatibility wrapper over [`Self::scan_match_into`].
+    pub fn scan_match<'a>(&'a self, input: &'a str) -> Option<(Vec<LexedElement<'a>>, usize)> {
+        let mut out = Vec::new();
+        let len = self.scan_match_into(input, &mut out)?;
+        Some((out, len))
     }
 
     fn search(&self, input: &str) -> Option<(usize, usize)> {
@@ -243,33 +393,28 @@ impl LexMatcher {
         }
     }
 
-    fn subdivide<'a>(&'a self, matched: LexedElement<'a>) -> Vec<LexedElement<'a>> {
+    fn subdivide_into<'a>(&'a self, matched: LexedElement<'a>, out: &mut Vec<LexedElement<'a>>) {
         if let Some(subdivider) = &self.subdivider {
-            let mut elements = Vec::new();
             let mut buffer = matched.raw;
             while !buffer.is_empty() {
                 if let Some((start, end)) = subdivider.search(buffer) {
-                    let trimmed_elems = self.trim_match(&buffer[..start]);
-                    elements.extend(trimmed_elems);
-                    elements.push(LexedElement {
+                    self.trim_match_into(&buffer[..start], out);
+                    out.push(LexedElement {
                         raw: &buffer[start..end],
                         matcher: subdivider,
                     });
                     buffer = &buffer[end..];
                 } else {
-                    let trimmed_elems = self.trim_match(buffer);
-                    elements.extend(trimmed_elems);
+                    self.trim_match_into(buffer, out);
                     break;
                 }
             }
-            elements
         } else {
-            vec![matched]
+            out.push(matched);
         }
     }
 
-    fn trim_match<'a>(&'a self, raw: &'a str) -> Vec<LexedElement<'a>> {
-        let mut elements = Vec::new();
+    fn trim_match_into<'a>(&'a self, raw: &'a str, out: &mut Vec<LexedElement<'a>>) {
         let mut buffer = raw;
         let mut content_buffer = 0..0;
 
@@ -278,22 +423,22 @@ impl LexMatcher {
                 if let Some((start, end)) = trim_post_subdivide.search(buffer) {
                     if start == 0 {
                         // Starting match
-                        elements.push(LexedElement {
+                        out.push(LexedElement {
                             raw: &buffer[..end],
                             matcher: trim_post_subdivide,
                         });
                         buffer = &buffer[end..];
                         content_buffer = end..end;
                     } else if end == buffer.len() {
-                        elements.push(LexedElement {
+                        out.push(LexedElement {
                             raw: &raw[content_buffer.start..content_buffer.end + start],
                             matcher: self,
                         });
-                        elements.push(LexedElement {
+                        out.push(LexedElement {
                             raw: &buffer[start..end],
                             matcher: trim_post_subdivide,
                         });
-                        return elements;
+                        return;
                     } else {
                         content_buffer.end += end;
                         buffer = &buffer[end..];
@@ -304,9 +449,8 @@ impl LexMatcher {
             }
         }
         if !content_buffer.is_empty() || !buffer.is_empty() {
-            elements.push(LexedElement::new(&raw[content_buffer.start..], self));
+            out.push(LexedElement::new(&raw[content_buffer.start..], self));
         }
-        elements
     }
 
     pub fn construct_token(&self, raw: &str, pos_marker: PositionMarker) -> Token {

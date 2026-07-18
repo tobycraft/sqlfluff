@@ -997,6 +997,7 @@ try:
                     quoted_value,
                     escape_replacements,
                     source_fixes,
+                    raw_upper,
                 ) = data
                 # Direct construction, mirroring RawSegment.__init__ (which
                 # `cls` is verified to use - see _fast_segment_types) field
@@ -1018,7 +1019,9 @@ try:
                     line_pos,
                 )
                 d["_raw"] = raw_str
-                d["_raw_upper"] = raw_str.upper()
+                # Pre-uppercased (and interned) on the Rust side; calling
+                # .upper() here cost a fresh string per token.
+                d["_raw_upper"] = raw_upper
                 d["segments"] = ()
                 d["instance_types"] = instance_types
                 d["trim_start"] = trim_start

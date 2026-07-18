@@ -61,7 +61,11 @@ pub struct Token {
     parent_idx: Option<usize>,
     pub segments: Vec<Token>,
     preface_modifier: Cow<'static, str>,
-    suffix: Cow<'static, str>,
+    /// Preface suffix. `None` derives it from `raw` on demand in
+    /// `preface()` - computing it eagerly (a `format!` + `escape_debug`
+    /// walk per token) was ~6% of a whole lex pass for a field that is
+    /// only read when dumping trees.
+    suffix: Option<Cow<'static, str>>,
     pub uuid: u128,
     pub source_fixes: Option<Vec<SourceFix>>,
     pub trim_start: Option<Vec<String>>,
@@ -570,7 +574,18 @@ impl Token {
         let padded_type = format!("{}{}{}:", padding, self.preface_modifier, self.get_type());
 
         let pos = self.pos_marker.clone();
-        let suffix = self.suffix.clone();
+        let suffix = match &self.suffix {
+            Some(s) => s.clone(),
+            // Raw tokens derive their preface suffix from the raw text.
+            None => Cow::Owned(format!(
+                "'{}'",
+                self.raw
+                    .as_str()
+                    .escape_debug()
+                    .to_string()
+                    .trim_matches('"')
+            )),
+        };
 
         let preface = format!(
             "{:<20}|{:<60}  {}",

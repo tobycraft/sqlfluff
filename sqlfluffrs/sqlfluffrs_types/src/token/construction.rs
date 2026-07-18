@@ -50,7 +50,7 @@ impl Token {
             parent_idx: None,
             segments,
             preface_modifier: Cow::Borrowed(""),
-            suffix: Cow::Borrowed(""),
+            suffix: Some(Cow::Borrowed("")),
             uuid: crate::identity::next_id(),
             source_fixes: None,
             trim_start,
@@ -60,11 +60,10 @@ impl Token {
     }
 
     pub fn raw_token(raw: String, pos_marker: PositionMarker, config: TokenConfig) -> Self {
-        let suffix = format!("'{}'", raw.escape_debug().to_string().trim_matches('"'));
-
         let mut token = Token::base_token(raw, pos_marker, config, vec![]);
         token.class_name = Cow::Borrowed("RawSegment");
-        token.suffix = Cow::Owned(suffix);
+        // Derived from `raw` on demand in `preface()` (see the field docs).
+        token.suffix = None;
         token.token_type = Cow::Borrowed("raw");
         token.class_types = RAW_CT.clone();
         token
@@ -194,7 +193,7 @@ impl Token {
         token.is_templated = is_templated;
         token.block_uuid = block_uuid;
         token.preface_modifier = Cow::Borrowed("[META] ");
-        token.suffix = Cow::Borrowed("");
+        token.suffix = Some(Cow::Borrowed(""));
         token
     }
 
@@ -222,9 +221,11 @@ impl Token {
         token.class_name = Cow::Borrowed("Indent");
         token.class_types = INDENT_CT.clone();
         token.indent_value = 1;
-        token.suffix = block_uuid
-            .map(|u| Cow::Owned(u.as_hyphenated().to_string()))
-            .unwrap_or(Cow::Borrowed(""));
+        token.suffix = Some(
+            block_uuid
+                .map(|u| Cow::Owned(u.as_hyphenated().to_string()))
+                .unwrap_or(Cow::Borrowed("")),
+        );
         token
     }
 

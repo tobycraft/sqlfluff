@@ -26,7 +26,7 @@ fn main() {
     for (_, sqls) in &suites {
         for sql in sqls {
             let (tokens, _) =
-                Lexer::new(None, ANSI_LEXERS.to_vec()).lex(LexInput::String(sql.clone()), false);
+                Lexer::new(None, std::borrow::Cow::Borrowed(ANSI_LEXERS.as_slice())).lex(LexInput::String(sql.clone()), false);
             tokens_total += tokens.len();
         }
     }
@@ -35,7 +35,7 @@ fn main() {
         let t0 = Instant::now();
         for _ in 0..n {
             for sql in sqls {
-                let (tokens, _) = Lexer::new(None, ANSI_LEXERS.to_vec())
+                let (tokens, _) = Lexer::new(None, std::borrow::Cow::Borrowed(ANSI_LEXERS.as_slice()))
                     .lex(LexInput::String(sql.clone()), false);
                 std::hint::black_box(tokens);
             }

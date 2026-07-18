@@ -13,9 +13,12 @@ use sqlfluffrs_types::{
 use hashbrown::{HashMap, HashSet};
 
 use std::{
+    borrow::Cow,
     fmt::Display,
     ops::{Bound, RangeBounds},
 };
+
+use once_cell::sync::Lazy;
 
 use uuid::Uuid;
 
@@ -87,7 +90,7 @@ pub struct TemplateElement<'a> {
     // element (matchers hold compiled regexes and string tables) dominated
     // lexing allocations.
     pub raw: &'a str,
-    pub template_slice: Slice, // Slice equivalent
+    pub template_slice: Slice,   // Slice equivalent
     pub matcher: &'a LexMatcher, // The lexer that matched this element
 }
 
@@ -224,12 +227,19 @@ impl SQLLexError {
 #[derive(Clone)]
 pub struct Lexer {
     last_resort_lexer: LexMatcher,
-    matchers: Vec<LexMatcher>,
+    matchers: Cow<'static, [LexMatcher]>,
 }
 
 impl Lexer {
-    pub fn new(last_resort_lexer: Option<LexMatcher>, matchers: Vec<LexMatcher>) -> Self {
-        let last_resort_lexer = last_resort_lexer.unwrap_or_else(|| {
+    pub fn new(
+        last_resort_lexer: Option<LexMatcher>,
+        matchers: impl Into<Cow<'static, [LexMatcher]>>,
+    ) -> Self {
+        // Compiled once per process, not per Lexer: the linter constructs a
+        // fresh Lexer per lexed file, and compiling this regex per file was
+        // ~1.5M instructions each time. Cloning shares the compiled regex
+        // via its internal Arc.
+        static LAST_RESORT: Lazy<LexMatcher> = Lazy::new(|| {
             LexMatcher::regex_lexer(
                 // dialect,
                 "<unlexable>",
@@ -240,21 +250,26 @@ impl Lexer {
                 LexMatcherConfig::default(),
             )
         });
+        let last_resort_lexer = last_resort_lexer.unwrap_or_else(|| LAST_RESORT.clone());
         Self {
             last_resort_lexer,
-            matchers,
+            matchers: matchers.into(),
         }
     }
 
     pub fn lex_string<'a>(&'a self, mut input: &'a str) -> Vec<LexedElement<'a>> {
-        let mut element_buffer = Vec::with_capacity(input.len());
+        // Rough elements-per-byte heuristic: SQL averages ~5 bytes per lexed
+        // element, so `len` was a ~5x over-allocation; the buffer still only
+        // allocates a handful of times for pathological inputs.
+        let mut element_buffer = Vec::with_capacity(input.len() / 4);
 
         while !input.is_empty() {
-            if let Some((elements, match_length)) = self
-                .lex_match(input)
-                .or_else(|| self.last_resort_lexer.scan_match(input))
+            if let Some(match_length) =
+                self.lex_match_into(input, &mut element_buffer).or_else(|| {
+                    self.last_resort_lexer
+                        .scan_match_into(input, &mut element_buffer)
+                })
             {
-                element_buffer.extend(elements);
                 input = &input[match_length..];
             } else {
                 panic!(
@@ -267,10 +282,14 @@ impl Lexer {
         element_buffer
     }
 
-    pub fn lex_match<'a>(&'a self, input: &'a str) -> Option<(Vec<LexedElement<'a>>, usize)> {
+    fn lex_match_into<'a>(
+        &'a self,
+        input: &'a str,
+        out: &mut Vec<LexedElement<'a>>,
+    ) -> Option<usize> {
         self.matchers
             .iter()
-            .find_map(|matcher| matcher.scan_match(input))
+            .find_map(|matcher| matcher.scan_match_into(input, out))
     }
 
     fn map_template_slices<'a>(
@@ -465,14 +484,15 @@ fn iter_tokens(
     let mut block_stack = BlockTracker::new();
     let mut templated_file_slices = multipeek(templated_file.sliced_file.iter().peekable());
 
-    let mut yielded_elements: Vec<Token> = lexed_elements
-        .iter()
-        .enumerate()
-        .flat_map(|(idx, element)| -> std::vec::IntoIter<Token> {
+    // Push straight into the output buffer: the previous flat_map shape
+    // allocated a fresh `segments` Vec per lexed element (one per token).
+    let mut yielded_elements: Vec<Token> = Vec::with_capacity(lexed_elements.len() + 8);
+    for (idx, element) in lexed_elements.iter().enumerate() {
+        {
             log::debug!("  {}: {}. [tfs_idx = {}]", idx, element, tfs_idx);
             let mut consumed_length = 0;
             let mut stashed_source_idx = None;
-            let mut segments = Vec::new();
+            let segments = &mut yielded_elements;
 
             while let Some(tfs) = templated_file_slices.peek().cloned() {
                 log::debug!("      {}: {:?}", tfs_idx, tfs);
@@ -493,7 +513,8 @@ fn iter_tokens(
 
                 match tfs.slice_type.as_str() {
                     "literal" => {
-                        let tfs_offset = tfs.source_codepoint_slice.start as isize - tfs.templated_codepoint_slice.start as isize;
+                        let tfs_offset = tfs.source_codepoint_slice.start as isize
+                            - tfs.templated_codepoint_slice.start as isize;
 
                         if element.template_slice.stop <= tfs.templated_codepoint_slice.stop {
                             debug!(
@@ -501,13 +522,17 @@ fn iter_tokens(
                                 consumed_length
                             );
                             let slice_start = stashed_source_idx.unwrap_or_else(|| {
-                                (element.template_slice.start as isize + consumed_length as isize + tfs_offset) as usize
+                                (element.template_slice.start as isize
+                                    + consumed_length as isize
+                                    + tfs_offset) as usize
                             });
 
                             segments.push(element.to_token(
                                 PositionMarker::new(
                                     Slice::from(
-                                        slice_start..(element.template_slice.stop as isize + tfs_offset) as usize,
+                                        slice_start
+                                            ..(element.template_slice.stop as isize + tfs_offset)
+                                                as usize,
                                     ),
                                     element.template_slice,
                                     templated_file,
@@ -523,7 +548,8 @@ fn iter_tokens(
                             }
                             templated_file_slices.reset_peek();
                             break;
-                        } else if element.template_slice.start == tfs.templated_codepoint_slice.stop {
+                        } else if element.template_slice.start == tfs.templated_codepoint_slice.stop
+                        {
                             debug!("     NOTE: Missed Skip");
                             tfs_idx += 1;
                             templated_file_slices.next();
@@ -535,15 +561,18 @@ fn iter_tokens(
                                     "     Consuming split whitespace from literal. Existing Consumed: {}",
                                     consumed_length,
                                 );
-                                let incremental_length =
-                                    tfs.templated_codepoint_slice.stop - element.template_slice.start;
+                                let incremental_length = tfs.templated_codepoint_slice.stop
+                                    - element.template_slice.start;
                                 segments.push(element.to_token(
                                     PositionMarker::new(
                                         Slice::from(
                                             (element.template_slice.start as isize
                                                 + consumed_length as isize
-                                                + tfs_offset) as usize
-                                                ..(tfs.templated_codepoint_slice.stop as isize + tfs_offset) as usize,
+                                                + tfs_offset)
+                                                as usize
+                                                ..(tfs.templated_codepoint_slice.stop as isize
+                                                    + tfs_offset)
+                                                    as usize,
                                         ),
                                         element.template_slice,
                                         templated_file,
@@ -559,11 +588,14 @@ fn iter_tokens(
                             } else {
                                 debug!("     Spilling over literal slice.");
                                 if stashed_source_idx.is_none() {
-                                    stashed_source_idx =
-                                        Some((element.template_slice.start as isize + tfs_offset) as usize);
-                                        debug!(
-                                            "     Stashing a source start. {:?}", stashed_source_idx
-                                        );
+                                    stashed_source_idx = Some(
+                                        (element.template_slice.start as isize + tfs_offset)
+                                            as usize,
+                                    );
+                                    debug!(
+                                        "     Stashing a source start. {:?}",
+                                        stashed_source_idx
+                                    );
                                 }
                                 tfs_idx += 1;
                                 templated_file_slices.next();
@@ -591,7 +623,8 @@ fn iter_tokens(
                                     Some(consumed_length..),
                                 ));
 
-                                if element.template_slice.stop == tfs.templated_codepoint_slice.stop {
+                                if element.template_slice.stop == tfs.templated_codepoint_slice.stop
+                                {
                                     tfs_idx += 1;
                                     templated_file_slices.next();
                                 }
@@ -610,10 +643,8 @@ fn iter_tokens(
                     _ => panic!("Unexpected slice type: {}", tfs.slice_type),
                 }
             }
-
-            segments.into_iter()
-        })
-        .collect();
+        }
+    }
 
     while let Some(tfs) = templated_file_slices.next().cloned() {
         let next_tfs = templated_file_slices.peek().cloned();
@@ -950,7 +981,12 @@ pub mod python {
                 panic!("Lexer does not support setting both `config` and `dialect`.")
             }
             let dialect = cfg_dialect.unwrap_or_else(|| in_dialect.expect("Dialect not defined"));
-            Self(Lexer::new(None, dialect.get_lexers().to_vec()))
+            // Borrow the dialect's static matcher list - no per-Lexer clone of
+            // all ~40 matchers (the linter builds a Lexer per lexed file).
+            Self(Lexer::new(
+                None,
+                std::borrow::Cow::Borrowed(dialect.get_lexers().as_slice()),
+            ))
         }
 
         #[pyo3(signature = (input, template_blocks_indent = true))]
@@ -981,7 +1017,7 @@ pub mod python {
         /// Lex and additionally return per-token segment-construction data.
         ///
         /// Returns `(tokens, violations, seg_data)` where `seg_data[i]` is a
-        /// 15-tuple for `tokens[i]`:
+        /// 16-tuple for `tokens[i]`:
         /// `(type, raw, src_start, src_stop, tmpl_start, tmpl_stop, line_no,
         ///   line_pos, instance_types, trim_start, trim_chars, uuid,
         ///   quoted_value, escape_replacements, source_fixes)`
@@ -1057,24 +1093,46 @@ pub mod python {
                     .source_fixes
                     .as_ref()
                     .map(|v| v.iter().map(|f| PySourceFix(f.clone())).collect());
-                // NOTE: 15 elements - beyond IntoPyObject's tuple limit -
-                // so the row tuple is assembled manually.
-                let row_items: [Py<PyAny>; 15] = [
+                // NOTE: 16 elements - beyond IntoPyObject's tuple limit -
+                // so the row tuple is assembled manually. Raw and raw_upper
+                // are interned per call: SQL repeats the same keywords,
+                // operators and punctuation constantly, so most tokens share
+                // an existing Python string instead of allocating one.
+                let row_items: [Py<PyAny>; 16] = [
                     type_obj.into_any(),
-                    PyString::new(py, token.raw()).unbind().into_any(),
+                    intern(py, &mut interned, token.raw()).into_any(),
                     pm.source_slice.start.into_pyobject(py)?.unbind().into_any(),
                     pm.source_slice.stop.into_pyobject(py)?.unbind().into_any(),
-                    pm.templated_slice.start.into_pyobject(py)?.unbind().into_any(),
-                    pm.templated_slice.stop.into_pyobject(py)?.unbind().into_any(),
+                    pm.templated_slice
+                        .start
+                        .into_pyobject(py)?
+                        .unbind()
+                        .into_any(),
+                    pm.templated_slice
+                        .stop
+                        .into_pyobject(py)?
+                        .unbind()
+                        .into_any(),
                     line_no.into_pyobject(py)?.unbind().into_any(),
                     line_pos.into_pyobject(py)?.unbind().into_any(),
                     instance_types.unbind().into_any(),
-                    token.trim_start.as_ref().into_pyobject(py)?.unbind().into_any(),
-                    token.trim_chars.as_ref().into_pyobject(py)?.unbind().into_any(),
+                    token
+                        .trim_start
+                        .as_ref()
+                        .into_pyobject(py)?
+                        .unbind()
+                        .into_any(),
+                    token
+                        .trim_chars
+                        .as_ref()
+                        .into_pyobject(py)?
+                        .unbind()
+                        .into_any(),
                     token.uuid.into_pyobject(py)?.unbind().into_any(),
                     quoted_value.into_pyobject(py)?.unbind().into_any(),
                     escape_replacements.into_pyobject(py)?.unbind().into_any(),
                     source_fixes.into_pyobject(py)?.unbind().into_any(),
+                    intern(py, &mut interned, token.raw_upper()).into_any(),
                 ];
                 seg_data.append(PyTuple::new(py, row_items)?)?;
             }

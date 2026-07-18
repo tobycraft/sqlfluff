@@ -1063,6 +1063,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "itertools 0.14.0",
  "log",
+ "once_cell",
  "pyo3",
  "sqlfluffrs_dialects",
  "sqlfluffrs_python",
@@ -1118,6 +1119,7 @@ dependencies = [
  "log",
  "once_cell",
  "regex",
+ "regex-syntax",
  "serde",
  "uuid",
 ]
