@@ -1007,7 +1007,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "log",
  "pyo3",
- "serde_yaml_ng",
  "sqlfluffrs_dialects",
  "sqlfluffrs_lexer",
  "sqlfluffrs_parser",
