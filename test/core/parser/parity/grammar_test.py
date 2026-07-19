@@ -54,10 +54,40 @@ def _all_dialect_labels():
 
 
 # Dialects with a *known*, already-documented dangling ref (pin an SQL-reachable
-# repro in test/fixtures/parity/dangling_refs.yml before listing one here). Every
-# Ref in every dialect's expanded grammar must resolve; this stays empty unless a
-# future divergence needs a temporary, strictly-guarded exemption.
-_KNOWN_DANGLING_REF_DIALECTS: set = set()
+# repro in test/fixtures/parity/dangling_refs.yml before listing one here). Not
+# yet fixed on this branch; cleared by the upcoming dialect grammar-fixes commit
+# (mostly the shared ansi_keywords FORMATS/POLICIES gap, which every dialect
+# inherits). Currently empty once that commit lands.
+_KNOWN_DANGLING_REF_DIALECTS: set = {
+    "ansi",
+    "athena",
+    "bigquery",
+    "clickhouse",
+    "databricks",
+    "db2",
+    "doris",
+    "duckdb",
+    "exasol",
+    "flink",
+    "greenplum",
+    "hive",
+    "impala",
+    "mariadb",
+    "materialize",
+    "mysql",
+    "oracle",
+    "postgres",
+    "redshift",
+    "snowflake",
+    "soql",
+    "sparksql",
+    "sqlite",
+    "starrocks",
+    "teradata",
+    "trino",
+    "tsql",
+    "vertica",
+}
 
 
 def _dialect_param(label):

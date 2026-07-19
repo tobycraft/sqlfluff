@@ -1,0 +1,57 @@
+# Parity test cases - data for test/core/parser/parity/cases_test.py.
+# See test/fixtures/parity/README.md for the schema and strictness contract.
+#
+# SQL-reachable repros for fixed dangling grammar refs (see also grammar_test.py).
+
+ansi_grant_all_masking_policies:
+  sql: GRANT SELECT ON ALL MASKING POLICIES IN SCHEMA s TO r
+  expect: clean_tree
+  xfail:
+    python_vs_rust: 'Not yet fixed: ansi grammar references the POLICIES keyword without registering it - Python''s Ref raises RuntimeError the moment the branch is attempted, while Rust resolves the missing name to Empty and silently fails the branch. Fixed by the upcoming dialect grammar-fixes commit.'
+  pins: 'Dangling grammar refs: Python''s Ref raises RuntimeError the moment the
+    branch is attempted, while the generated Rust tables resolve the missing name
+    to Empty and silently fail the branch - identical SQL crashed one engine and
+    quietly produced an unparsable tree on the other. ansi grammar referenced the
+    POLICIES keyword without registering it.'
+ansi_grant_future_masking_policies:
+  sql: GRANT SELECT ON FUTURE MASKING POLICIES IN SCHEMA s TO r
+  expect: clean_tree
+  xfail:
+    python_vs_rust: 'Not yet fixed: FUTURE variant of the same POLICIES keyword gap. Fixed by the upcoming dialect grammar-fixes commit.'
+  pins: 'Dangling grammar refs: Python''s Ref raises RuntimeError the moment the
+    branch is attempted, while the generated Rust tables resolve the missing name
+    to Empty and silently fail the branch - identical SQL crashed one engine and
+    quietly produced an unparsable tree on the other. FUTURE variant of the POLICIES
+    keyword gap.'
+ansi_grant_all_file_formats:
+  sql: GRANT SELECT ON ALL FILE FORMATS IN SCHEMA s TO r
+  expect: clean_tree
+  xfail:
+    python_vs_rust: 'Not yet fixed: ansi grammar references the FORMATS keyword without registering it, the same dangling-ref class as the POLICIES gap. Fixed by the upcoming dialect grammar-fixes commit.'
+  pins: 'Dangling grammar refs: Python''s Ref raises RuntimeError the moment the
+    branch is attempted, while the generated Rust tables resolve the missing name
+    to Empty and silently fail the branch - identical SQL crashed one engine and
+    quietly produced an unparsable tree on the other. ansi grammar referenced the
+    FORMATS keyword without registering it.'
+mysql_exchange_partition_table_reference:
+  sql: ALTER TABLE t EXCHANGE PARTITION p WITH TABLE t2 WITH VALIDATION
+  dialect: mysql
+  expect: clean_tree
+  xfail:
+    python_vs_rust: 'Not yet fixed: mysql EXCHANGE PARTITION grammar has Ref(''TableReference'') - a typo for TableReferenceSegment. Fixed by the upcoming dialect grammar-fixes commit.'
+  pins: 'Dangling grammar refs: Python''s Ref raises RuntimeError the moment the
+    branch is attempted, while the generated Rust tables resolve the missing name
+    to Empty and silently fail the branch - identical SQL crashed one engine and
+    quietly produced an unparsable tree on the other. mysql EXCHANGE PARTITION had
+    Ref(''TableReference'') - a typo for TableReferenceSegment.'
+postgres_alter_foreign_table_column_keyword:
+  sql: ALTER FOREIGN TABLE ft ALTER COLUMN c OPTIONS (ADD opt 'v')
+  dialect: postgres
+  expect: clean_tree
+  xfail:
+    python_vs_rust: 'Not yet fixed: postgres ALTER FOREIGN TABLE ... ALTER COLUMN grammar has a dangling keyword reference. Fixed by the upcoming dialect grammar-fixes commit.'
+  pins: 'Dangling grammar refs: Python''s Ref raises RuntimeError the moment the
+    branch is attempted, while the generated Rust tables resolve the missing name
+    to Empty and silently fail the branch - identical SQL crashed one engine and
+    quietly produced an unparsable tree on the other. postgres ALTER FOREIGN TABLE
+    had Ref(''COLUMN'') - a segment ref where the COLUMN keyword was intended.'

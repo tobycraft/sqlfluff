@@ -1,0 +1,46 @@
+# Parity test cases - data for test/core/parser/parity/cases_test.py.
+# See test/fixtures/parity/README.md for the schema and strictness contract.
+#
+# Parse-error message bytes and parser-created segment kwargs parity.
+
+container_segment_instance_types_crash:
+  sql: "CREATE OR REPLACE SCRIPT aschema.hello AS\n 'HELLO'\n/\n--\n"
+  dialect: exasol
+  pins: The ref-combining isinstance path attached the token's instance_types to
+    a CONTAINER class (ScriptContentSegment), which BaseSegment.__init__ rejects
+    - RustParser crashed with TypeError while Python parsed fine.
+found_token_class_name:
+  sql: SELECT ] FROM t
+  dialect: flink
+  xfail:
+    python_vs_rust: 'Not yet fixed: ''Found <...>'' parse-error messages must display code-matched tokens as CodeSegment as Python does - Rust renders RawSegment instead. Fixed by the upcoming Rust engine parity commit.'
+  pins: '''Found <...>'' parse-error messages must display code-matched tokens as
+    CodeSegment as Python does - Rust rendered RawSegment.'
+found_token_repr_quoting:
+  sql: SELECT '
+  xfail:
+    python_vs_rust: 'Not yet fixed: token raws in error messages must follow Python''s repr() quote-selection rules - Rust uses escape_debug quoting instead. Fixed by the upcoming Rust engine parity commit.'
+  pins: Token raws in error messages follow Python's repr() quote-selection rules
+    - Rust used escape_debug quoting.
+expected_message_curtailment:
+  sql: SELECT AS x
+  dialect: databricks
+  xfail:
+    python_vs_rust: 'Not yet fixed: ''Expected: <...>'' grammar reprs must be curtailed like Python''s (40 chars per element, 100 for the joined list) - Rust renders them in full. Fixed by the upcoming Rust engine parity commit.'
+  pins: '''Expected: <...>'' grammar reprs are curtailed like Python''s - 40 chars
+    per element, 100 for the joined list - where Rust rendered them in full.'
+parser_created_segments_drop_token_trim_chars:
+  sql: SET @errmsg = 'x';
+  dialect: mysql
+  xfail:
+    python_vs_rust: 'Not yet fixed: parser-created segments must inherit only quoted_value/escape_replacements/casefold from the lexed token, not trim_chars, matching RawSegment.from_result_segments - Rust forwards the token''s trim_chars (''@'',) instead. Fixed by the upcoming Rust engine parity commit.'
+  pins: Parser-created segments inherit only quoted_value/escape_replacements/casefold
+    from the lexed token - NOT trim_chars - matching RawSegment.from_result_segments;
+    Rust used to forward the token's trim_chars ('@',).
+sequence_found_message_no_trailing_period:
+  sql: SELECT STRUCT<a INT64(1)
+  dialect: bigquery
+  xfail:
+    python_vs_rust: 'Not yet fixed: Sequence error messages - Rust appends a trailing period to ''Found <...>.'' that Python''s format doesn''t have. Fixed by the upcoming Rust engine parity commit.'
+  pins: 'Sequence error messages: Rust appended a trailing period to ''Found <...>.''
+    that Python''s format doesn''t have.'

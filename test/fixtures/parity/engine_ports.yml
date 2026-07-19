@@ -1,0 +1,61 @@
+# Parity test cases - data for test/core/parser/parity/cases_test.py.
+# See test/fixtures/parity/README.md for the schema and strictness contract.
+#
+# Cases ported from the deleted ad-hoc sqlfluffrs/tests/*.rs integration tests.
+
+ansi_is_not_distinct_from:
+  sql: SELECT a_column FROM t_table WHERE a_column IS NOT DISTINCT FROM b_column;
+  expect: clean_tree
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): IS NOT DISTINCT
+    FROM comparison (test_is_not_distinct.rs).'
+ansi_count_distinct_multiple_args:
+  sql: SELECT COUNT(DISTINCT col1, col2) FROM table1
+  expect: clean_tree
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): Bracketed with
+    multiple elements creates an implicit Sequence (test_bracketed_sequence.rs).'
+ansi_bracketed_delimited_list:
+  sql: SELECT (a, b, c)
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): Delimited list
+    where the closing bracket terminates delimiter search (test_delimited_terminator_timing.rs).'
+bigquery_typed_numeric_literal:
+  sql: SELECT NUMERIC '0';
+  dialect: bigquery
+  expect: clean_tree
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): typed NUMERIC
+    literal (test_numeric_literal.rs).'
+bigquery_typed_numeric_literal_comparison:
+  sql: SELECT NUMERIC '0' = NUMERIC '0';
+  dialect: bigquery
+  expect: clean_tree
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): typed literals
+    in comparison (test_numeric_literal.rs).'
+bigquery_typed_literals_multi_statement:
+  sql: 'SELECT NUMERIC ''0'';
+
+
+    SELECT NUMERIC ''0'' = NUMERIC ''0'';
+
+
+    SELECT NUMERIC "0";
+
+
+    SELECT NUMERIC "0" = NUMERIC "0";'
+  dialect: bigquery
+  expect: clean_tree
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): typed literals
+    with both quote styles across statements (test_multiple_statements.rs).'
+bigquery_exception_block_system_variable:
+  sql: "BEGIN\n  SELECT 100/0;\nEXCEPTION WHEN ERROR THEN\n  RAISE USING MESSAGE\
+    \ = FORMAT(\"Something went wrong: %s\", @@error.message);\nEND;"
+  dialect: bigquery
+  expect: clean_tree
+  xfail:
+    python_vs_rust: 'Not yet fixed: the Rust engine diverges from Python parsing a BigQuery EXCEPTION block that references the @@error.message system variable. Fixed by the upcoming Rust engine parity commit.'
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): EXCEPTION block
+    with @@error.message system variable (test_handle_exception.rs).'
+ansi_create_sequence_options:
+  sql: CREATE SEQUENCE s INCREMENT BY 1 START WITH 10
+  expect: clean_tree
+  pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): sequence options
+    grammar reached from a full statement (table_driven_small.rs exercised CreateSequenceOptionsSegment
+    directly).'

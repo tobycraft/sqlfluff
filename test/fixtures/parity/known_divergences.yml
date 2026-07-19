@@ -1,0 +1,56 @@
+# Parity test cases - data for test/core/parser/parity/cases_test.py.
+# See test/fixtures/parity/README.md for the schema and strictness contract.
+#
+# Still-open Python-vs-Rust engine divergences, each pinned as a strict xfail that flips CI when fixed.
+
+sqlite_nothing_here_expected_message:
+  sql: "WITH cte AS (\n t\n)\nSELECT"
+  dialect: sqlite
+  xfail:
+    python_vs_rust: 'Known rust-core gap: the unparsable ''Expected:'' message says
+      ''Nothing here.'' where Python names the expected grammar element.'
+  pins: Fuzz-derived minimized repro (round five).
+materialize_curly_cross_silent_recovery:
+  sql: COPY t FROM STDIN (FORMAT {-
+  dialect: materialize
+  xfail:
+    python_vs_rust: 'Known rust-core gap: a stray opening ''{'' crossed with '')''
+      raises ''Found unexpected end bracket!'' in Python but Rust quietly recovers
+      a tree.'
+  pins: Fuzz-derived minimized repro (round five).
+tsql_cast_structure:
+  sql: select CAST(0X0 uniqueidentifier);
+  dialect: tsql
+  xfail:
+    python_vs_rust: 'Known rust-core gap: structural divergence - Python parses the
+      malformed CAST content as column_reference, Rust as function.'
+  pins: Fuzz-derived minimized repro (round five).
+materialize_webhook_overlapping_matches:
+  sql: "(\n ) ( );\nCREATE SOURCE my_webhook_source IN CLUSTER my_cluster FROM WEBHOOK\n\
+    \ BODY FORMAT JSON\n (\n (\n my_webhook_share"
+  dialect: materialize
+  xfail:
+    python_vs_rust: 'Known rust-core bug: the core emits OVERLAPPING child matches
+      for this input, so the Python-side builder raises its internal ''Segment skip
+      ahead error'' ValueError instead of Python''s SQLParseError. See also the invariants
+      case invariants.yml:materialize_webhook_overlap.'
+  pins: Fuzz-derived minimized repro (round five).
+depth_guard_error_position:
+  sql: SELECT CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN
+    CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN
+    1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE
+    WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN
+    CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN
+    1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE
+    WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN
+    CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN
+    1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN CASE WHEN 1 THEN 0 END END END END END
+    END END END END END END END END END END END END END END END END END END END END
+    END END END END END END END END END END END END END END END
+  xfail:
+    python_vs_rust: 'Known gap: for depth/complexity guard errors, the RustParser
+      pipeline anchors the SQLParseError at the token where the limit tripped (line/pos
+      set), while the pure-Python parser raises from ParseContext.deeper_match with
+      no segment anchor, so line_no/line_pos stay 0. Same exception type and message;
+      only the position attributes differ.'
+  pins: Depth-guard SQLParseError position anchoring difference.

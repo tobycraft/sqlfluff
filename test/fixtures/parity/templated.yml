@@ -1,0 +1,105 @@
+# Parity test cases - data for test/core/parser/parity/cases_test.py.
+# See test/fixtures/parity/README.md for the schema and strictness contract.
+#
+# Jinja-templated sources: placeholder tokens and the Linter-driven parse path.
+
+substituted_variables:
+  sql: SELECT {{ col }} FROM {{ table }}
+  templater: jinja
+  context: &id001
+    col: a
+    table: t
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): plain
+    variable substitution.'
+if_block_placeholder:
+  sql: SELECT a{% if true %}, b{% endif %} FROM t
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): block
+    placeholders with block_uuid metadata.'
+for_loop_repetition:
+  sql: SELECT {% for c in ['a','b'] %}{{ c }},{% endfor %} d FROM t
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): loop
+    repetition in the source map.'
+comment_only_template:
+  sql: '{# note #}SELECT 1'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): template
+    comment before code.'
+set_only_template:
+  sql: '{% set x = 1 %}'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): template
+    that renders to no code.'
+malformed_rendered_sql:
+  sql: SELECT {{ col }} FROM
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): rendered
+    SQL is malformed.'
+unclosed_if_block:
+  sql: SELECT a {% if x %} FROM t
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): unclosed
+    block (templating violation).'
+unclosed_for_block:
+  sql: '{% for i in range(3) %}SELECT {{ i }};'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): unclosed
+    loop (templating violation).'
+jinja_syntax_error:
+  sql: SELECT {{ 1 + }} FROM t
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): jinja
+    syntax error (no tree at all).'
+undefined_variable:
+  sql: SELECT {{ undefined_var }} FROM t
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): undefined
+    variable renders empty.'
+empty_block_mid_statement:
+  sql: SELECT 1{% if true %}{% endif %}
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): block
+    rendering to nothing mid-statement.'
+empty_block_only:
+  sql: '{% if true %}{% endif %}'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): whole
+    source renders to nothing.'
+raw_block_survives:
+  sql: '{% raw %}SELECT {{ not_a_var }}{% endraw %} FROM t'
+  templater: jinja
+  context: *id001
+  xfail:
+    python_vs_rust: 'Not yet fixed: Jinja {% raw %} block template syntax surviving into SQL diverges between the native and legacy build paths. Fixed by the upcoming Rust engine parity commit.'
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): raw block:
+    template syntax surviving into SQL.'
+escaped_block_marker:
+  sql: '{{ ''{%'' }} SELECT 1'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): escaped
+    block marker in output.'
+macro_expansion:
+  sql: '{% macro m(x) %}{{ x }} + 1{% endmacro %}SELECT {{ m(2) }}'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): macro
+    definition and call.'
+loop_multi_statement:
+  sql: '{% for i in range(3) %}SELECT {{ i }};{% endfor %}'
+  templater: jinja
+  context: *id001
+  pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): loop
+    expanding to multi-statement SQL.'
