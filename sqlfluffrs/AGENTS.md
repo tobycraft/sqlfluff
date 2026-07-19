@@ -45,9 +45,7 @@ sqlfluffrs/
 ├── sqlfluffrs.pyi          # Python type stubs (Rs* names); + py.typed marker
 ├── src/                    # Root crate — aggregation only
 │   ├── lib.rs              #   Library root
-│   ├── python.rs           #   #[pymodule] — registers all PyO3 classes
-│   └── test_harness.rs     #   Fixture-comparison test helpers
-├── tests/                  # Integration tests (YAML/fixture parity vs Python)
+│   └── python.rs           #   #[pymodule] — registers all PyO3 classes
 ├── benches/                # Criterion benchmarks (parser_bench, …)
 │
 ├── sqlfluffrs_types/       # LEAF crate — core data types (no internal deps):
@@ -404,9 +402,12 @@ the generators in `utils/build_*.py`):
    ```bash
    tox -e py312
    ```
-   Cross-language parity is also checked by the Rust integration tests in
-   `tests/` (e.g. `fixture_tests.rs`), which compare Rust parse output against
-   the YAML fixtures used by the Python tests.
+   Cross-engine parity (Python parser/lexer vs the Rust engine, in both its
+   build paths) is guarded by the data-driven suite under
+   `test/core/parser/parity/`, driven by the case corpus in
+   `test/fixtures/parity/*.yml`. Add new parity regressions there as YAML
+   cases; see `test/fixtures/parity/README.md` for the format and the
+   byte-level strictness contract.
 
 ## Common Tasks
 

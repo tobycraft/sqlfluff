@@ -3,8 +3,10 @@
 Differential harnesses used to audit byte-level parity between the pure-Python
 parser/lexer and the Rust engine (`sqlfluffrs`). These are exploration tools,
 not CI tests - the fast, deterministic regression guards distilled from their
-findings live in `test/core/parser/rust_parser_test.py` and
-`test/core/parser/rust_parity_guards_test.py`.
+findings live in the data-driven parity suite: drivers under
+`test/core/parser/parity/` and the case corpus in
+`test/fixtures/parity/*.yml` (see `test/fixtures/parity/README.md` for the
+format and the strictness contract).
 
 Run them from this directory (running from the repo root shadows the installed
 `sqlfluffrs` extension with the source tree).

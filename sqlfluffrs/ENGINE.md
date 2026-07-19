@@ -134,21 +134,31 @@ the engine (this crate) interprets the tables
 
 ## 7. Debugging a fixture mismatch
 
-Parity fixtures (`sqlfluffrs/tests/fixture_tests.rs` / `yaml_compare.rs`) compare Rust output
-to the Python-generated `*.yml` under `test/fixtures/dialects/<dialect>/`. When one fails:
+Cross-engine parity is guarded from the Python side: the three-way corpus
+sweep (`test/core/parser/parity/corpus_test.py`) compares the pure-Python
+parser, RustParser's legacy build path and its native-AST path over every
+`test/fixtures/dialects/<dialect>/*.sql`, and the case corpus in
+`test/fixtures/parity/*.yml` pins the minimized adversarial repros. When a
+mismatch surfaces:
 
-1. **Reproduce narrowly:** `cargo test --test yaml_compare <name>` (or `fixture_tests`).
-2. **Localise the divergence:** the failing `yaml_compare` test prints a line-by-line
-   comparison of the expected (Python) vs generated (Rust) YAML tree — scan it for the first
-   line where the node kind or nesting differs.
-3. **Trace deep cases:** rebuild with `--features verbose-debug` for the `vdebug!` frame
-   trace, and use `Parser::dump_grammar_info(...)` to inspect resolved tables.
+1. **Reproduce narrowly:** run the offending fixture through the sweep, e.g.
+   `tox -e py312-rust -- test/core/parser/parity/corpus_test.py -k <name>`,
+   or add a minimal case to `test/fixtures/parity/` and run
+   `cases_test.py -k <name>`.
+2. **Localise the divergence:** the assertion diffs the two engines' captured
+   trees (tuple form with positions), stringify bytes and exceptions — scan
+   for the first node where kind or nesting differs.
+3. **Trace deep cases:** rebuild with `--features verbose-debug` for the
+   `vdebug!` frame trace, and use `Parser::dump_grammar_info(...)` to inspect
+   resolved tables.
 4. **Map symptom → invariant (see the Python-parity contract):** wrong alternative → #1 (longest match / hints); trailing
    tokens dropped or an unexpected error → #2/#3 (parse mode / terminators); right tokens but
    wrong nesting or missing meta → #4.
-5. **Lock it in:** add a minimal reproducer as a dialect fixture
+5. **Lock it in:** for well-formed SQL, add a dialect fixture
    (`test/fixtures/dialects/<dialect>/<name>.sql`), generate its tree with
-   `tox -e generate-fixture-yml`, and commit both. The `pyXXX-rust` suite then guards it.
+   `tox -e generate-fixture-yml`, and commit both — the corpus sweep then
+   guards it. For malformed/adversarial input, add a case to
+   `test/fixtures/parity/` (see its README).
 
 ## 8. Glossary
 

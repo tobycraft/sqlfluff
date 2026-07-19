@@ -83,8 +83,9 @@ jobs:
 
   rust-lint:
     # Rust formatting, lints and unit tests for the sqlfluffrs workspace.
-    # Integration tests (sqlfluffrs/tests/*.rs) are not run here; parity is
-    # covered by the python -rust suites below.
+    # Cross-engine parity is covered by the python -rust suites below
+    # (test/core/parser/parity/ + test/fixtures/parity/), not by Rust-side
+    # integration tests.
     runs-on: ubuntu-latest
     steps:
 
