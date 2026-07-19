@@ -27,6 +27,7 @@ from sqlfluff.core.parser.segments import (
     Dedent,
     ImplicitIndent,
     Indent,
+    RawSegment,
     TemplateSegment,
     UnparsableSegment,
 )
@@ -146,15 +147,18 @@ try:
                 "dialect_obj"
             ).get_root_segment()
 
-            # Extract indentation config and convert boolean values only
+            # Extract indentation config for Conditional grammar evaluation.
+            # PYTHON PARITY: ParseContext.from_config coerces EVERY value in
+            # this section with bool() - it does not filter by type. Config
+            # values here are not reliably bool: the ini layer coerces "1"
+            # (and values set via FluffConfig.set_value(True)) to int 1, so
+            # an isinstance(v, bool) filter silently DROPPED truthy settings
+            # like `indented_joins = 1` on the Rust side while the Python
+            # parser honoured them - flipping Conditional Indent/Dedent
+            # placement between the two engines for identical config.
             indent_config = self.config.get_section("indentation") or {}
             if indent_config:
-                # Only keep boolean config values for conditional evaluation
-                # Non-boolean values like "indent_unit": "space" are not needed
-                # for conditionals
-                indent_config = {
-                    k: v for k, v in indent_config.items() if isinstance(v, bool)
-                }
+                indent_config = {k: bool(v) for k, v in indent_config.items()}
 
             # Max parse depth (DoS mitigation); 0 disables the limit
             max_parse_depth = self.config.get("max_parse_depth")
@@ -267,6 +271,15 @@ try:
                 if _NATIVE_AST_ENABLED:
                     # Fused path: instantiate segments directly from rs_match in a
                     # single pass (no intermediate Python MatchResult tree).
+                    # LOGGING PARITY: the legacy path logs the root match at INFO
+                    # below. Emit byte-identical output here, but only pay for
+                    # building the intermediate MatchResult when that log level
+                    # is actually enabled (it isn't in normal operation).
+                    if parser_logger.isEnabledFor(logging.INFO):
+                        parser_logger.info(
+                            "Root Match:\n%s",
+                            self._convert_rs_match_result(rs_match, code_segments),
+                        )
                     if _prof is not None:
                         _ts = time.perf_counter()
                     _matched = self._apply_rs_match_result(
@@ -455,7 +468,14 @@ try:
             # Build segment_kwargs - optimize by checking first if we need any
             segment_kwargs: dict[str, Any] = {}
             if rs_match.instance_types:
-                segment_kwargs["instance_types"] = tuple(rs_match.instance_types)
+                # PYTHON PARITY: only RawSegment accepts `instance_types`.
+                # The Rust ref-combining isinstance path can attach the
+                # token's types to a match whose class is a *container*
+                # segment (e.g. exasol's ScriptContentSegment wrapping a
+                # quoted script body); Python never emits instance_types
+                # there, and BaseSegment.__init__ would reject the kwarg.
+                if matched_class is None or issubclass(matched_class, RawSegment):
+                    segment_kwargs["instance_types"] = tuple(rs_match.instance_types)
 
             # Copy over any segment_kwargs from Rust
             # (e.g., "expected" for UnparsableSegment)
@@ -473,10 +493,14 @@ try:
                 elif rs_match.casefold == "lower":
                     segment_kwargs["casefold"] = str.lower
 
-            # Set quoted_value and escape_replacement for normalization
-            if rs_match.quoted_value:  # pragma: no cover
+            # Set quoted_value and escape_replacement for normalization.
+            # NOTE: These are hot paths, not dead code: the Rust parser emits
+            # them for quoted literals across the corpus (e.g. ansi
+            # single-quoted strings), and rules like RF06 consume the
+            # resulting normalization kwargs.
+            if rs_match.quoted_value:
                 segment_kwargs["quoted_value"] = rs_match.quoted_value
-            if rs_match.escape_replacement:  # pragma: no cover
+            if rs_match.escape_replacement:
                 segment_kwargs["escape_replacements"] = [rs_match.escape_replacement]
 
             # Extract insert_segments (Indent/Dedent meta segments).
@@ -523,18 +547,19 @@ try:
             # Convert child matches recursively
             # Note: Transparent grammar nodes are now flattened on the Rust side,
             # so we don't need to do it here anymore
-            #
-            # NOTE: Keep this a plain loop rather than a generator expression:
-            # a genexpr would add its own stack frame per nesting level on top
-            # of this recursive call, which halves the safe recursion depth.
-            # Matches _apply_rs_match_result's plain for loop below, so both
-            # AST-building paths tolerate the same nesting depth.
-            child_matches_list = []
-            for child in rs_match.child_matches:
-                child_matches_list.append(
-                    self._convert_rs_match_result(child, segments, depth + 1)
-                )
-            child_matches = tuple(child_matches_list)
+            # NOTE: An explicit loop, not a generator/comprehension. Those add a
+            # second live interpreter frame per recursion level, which made this
+            # path exhaust the Python stack at roughly half the nesting depth
+            # that MatchResult.apply and the fused native-AST builder tolerate
+            # (so the two build paths failed at different input sizes).
+            child_matches: tuple[MatchResult, ...] = ()
+            if rs_match.child_matches:
+                _children: list[MatchResult] = []
+                for child in rs_match.child_matches:
+                    _children.append(
+                        self._convert_rs_match_result(child, segments, depth + 1)
+                    )
+                child_matches = tuple(_children)
 
             return MatchResult(
                 matched_slice=slice(start, stop),
