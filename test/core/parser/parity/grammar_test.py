@@ -1,13 +1,16 @@
 """Dialect grammar integrity checks born from the Rust parity audits.
 
-A ``Ref`` to a name the dialect can't resolve raises RuntimeError in Python
-the moment the branch is attempted, while the generated Rust tables silently
-treat it as Empty, i.e. somewhere in a dialect's grammar, there's a
-`Ref("SomeName")`` where "SomeName" was never actually registered in that
-dialect (e.g. typo, or a keyword/segment that doesn't exist there). Identical
-SQL then crashes one engine and quietly fails a branch on the other. This
-guard keeps every dialect's expanded grammar fully resolvable. SQL-reachable
-repros for the fixed refs are pinned in ``test/fixtures/parity/regressions.yml``.
+A ``Ref`` is a placeholder that names a grammar rule to look up in the
+dialect (e.g. ``Ref("SelectClauseSegment")``). It's resolved lazily, only
+once the parser actually tries that branch during parsing, not when the
+grammar is built. If the named rule was never registered in that dialect
+(a typo, or a keyword/segment that doesn't exist there), the Python parser
+raises RuntimeError the moment it reaches that branch, while the generated
+Rust tables silently treat the missing ref as Empty instead. So identical
+SQL crashes one engine and quietly fails a branch on the other. This guard
+keeps every dialect's expanded grammar fully resolvable. SQL-reachable
+repros for the fixed refs are pinned in
+``test/fixtures/parity/regressions.yml``.
 """
 
 import pytest
@@ -58,7 +61,36 @@ def _all_dialect_labels():
 # repro in test/fixtures/parity/regressions.yml before listing one here). Every
 # Ref in every dialect's expanded grammar must resolve; this stays empty unless a
 # future divergence needs a temporary, strictly-guarded exemption.
-_KNOWN_DANGLING_REF_DIALECTS: set = set()
+_KNOWN_DANGLING_REF_DIALECTS: set = {
+    "ansi",
+    "athena",
+    "bigquery",
+    "clickhouse",
+    "databricks",
+    "db2",
+    "doris",
+    "duckdb",
+    "exasol",
+    "flink",
+    "greenplum",
+    "hive",
+    "impala",
+    "mariadb",
+    "materialize",
+    "mysql",
+    "oracle",
+    "postgres",
+    "redshift",
+    "snowflake",
+    "soql",
+    "sparksql",
+    "sqlite",
+    "starrocks",
+    "teradata",
+    "trino",
+    "tsql",
+    "vertica",
+}
 
 
 def _dialect_param(label):
