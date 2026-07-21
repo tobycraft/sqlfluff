@@ -485,20 +485,25 @@ impl Parser<'_> {
                             // element regardless of success (see the comment above),
                             // so this gap can mean two different things Python's
                             // Sequence.match (grammar/sequence.py) tells apart by
-                            // message: either the last content element genuinely
+                            // message: either a *required* content element genuinely
                             // failed to match (in which case Python names the
                             // expected grammar and found token - "to start
                             // sequence" if nothing had matched yet, "after X" if
-                            // something had), or every element matched fine and
-                            // this is real trailing content the grammar has nothing
-                            // left to claim (Python's generic "Nothing here."
-                            // GREEDY-leftover fallback). `child_is_empty` (the just
-                            // -processed element's result) distinguishes the two.
+                            // something had), or every required element matched
+                            // fine and this is real trailing content the grammar
+                            // has nothing left to claim (Python's generic "Nothing
+                            // here." GREEDY-leftover fallback). Crucially, a failed
+                            // *optional* element is NOT a failure Python reports:
+                            // `Sequence.match` does `if elem.is_optional(): continue`
+                            // and falls through to the same "Nothing here." leftover,
+                            // so gate on `current_required_failed` (a REQUIRED empty
+                            // match), not merely `child_is_empty`, or an optional
+                            // element's failure wrongly produces the specific message.
                             // `child_matches.len() == *content_start_len` checks
                             // whether any *content* element (as opposed to the
                             // opening bracket, which is always in `child_matches`
                             // by this point) has matched yet.
-                            let specific_message = if child_is_empty {
+                            let specific_message = if current_required_failed {
                                 content_ids.get(*content_idx).map(|&gid| {
                                     let element_desc = self.grammar_ctx.grammar_repr(gid);
                                     let error_token = self

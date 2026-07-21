@@ -4,15 +4,6 @@
 bracketed_optional_content_failure_nothing_here:
   sql: SELECT SUM(a) OVER (1 2 3) FROM t
   expect: tree
-  xfail:
-    python_vs_rust: "bracketed.rs emits the specific \"<elem> to start sequence.
-      Found ...\" unparsable message whenever the last content element returned
-      empty, without checking whether that element was optional. The window
-      function's Bracketed content (WindowSpecificationSegment, optional=True,
-      parse_mode=GREEDY) fails on '1 2 3', and Python's Sequence.match skips the
-      failed optional element and falls to the generic \"Nothing here.\"
-      GREEDY-leftover message, so the engines' UnparsableSegment expected text
-      diverges."
   pins: Bracketed content-failure message must match Python's Sequence.match -
     a failed *optional* content element yields "Nothing here.", not the specific
     "<elem> to start sequence/after X" message reserved for required failures.
