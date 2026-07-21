@@ -92,12 +92,6 @@ def test__parity__codegen_lexer_patterns_hash_seed_stable():
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
-@pytest.mark.xfail(
-    strict=True,
-    reason="parse_capture only forces the native-AST flag ON for 'rust-native'; "
-    "the 'rust' leg inherits the ambient SQLFLUFF_RS_NATIVE_AST global, so with "
-    "it set the legacy leg silently runs the native builder.",
-)
 def test__parity__rust_leg_forces_legacy_native_ast():
     """The ``rust`` leg must parse with the native-AST builder OFF regardless of
     the ambient ``SQLFLUFF_RS_NATIVE_AST`` global.

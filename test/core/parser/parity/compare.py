@@ -177,8 +177,11 @@ def parse_capture(engine, config, segments, fname="t.sql"):
 
     parser_cls = Parser if engine == "python" else RustParser
     previous_native_ast = get_native_ast()
-    if engine == "rust-native":
-        set_native_ast(True)
+    # Pin the native-AST flag to exactly this leg, never the ambient global:
+    # the 'rust' (legacy) leg must run with it OFF even when the environment
+    # (SQLFLUFF_RS_NATIVE_AST) has turned it on, or native_vs_legacy compares
+    # the native builder against itself.
+    set_native_ast(engine == "rust-native")
     try:
         tree = parser_cls(config=config).parse(segments, fname=fname)
     except BaseException as err:  # PanicException is a BaseException
@@ -217,8 +220,8 @@ def linted_parse_capture(engine, sql, dialect="ansi", configs=None, context=None
         config.set_value(["templater", "jinja", "context", key], value)
 
     previous_native_ast = get_native_ast()
-    if engine == "rust-native":
-        set_native_ast(True)
+    # See parse_capture: pin the flag to this leg, never the ambient global.
+    set_native_ast(engine == "rust-native")
     try:
         parsed = Linter(config=config).parse_string(sql, fname="t.sql")
     except BaseException as err:  # PanicException is a BaseException
