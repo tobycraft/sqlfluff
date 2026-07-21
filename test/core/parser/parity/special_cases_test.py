@@ -13,6 +13,10 @@ import sys
 import weakref
 from pathlib import Path
 
+import pytest
+
+from .compare import _HAS_RUST_PARSER
+
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -85,3 +89,52 @@ def test__parity__codegen_lexer_patterns_hash_seed_stable():
         )
         outputs.add(proc.stdout)
     assert len(outputs) == 1, "lexer matcher patterns vary with the hash seed"
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.xfail(
+    strict=True,
+    reason="parse_capture only forces the native-AST flag ON for 'rust-native'; "
+    "the 'rust' leg inherits the ambient SQLFLUFF_RS_NATIVE_AST global, so with "
+    "it set the legacy leg silently runs the native builder.",
+)
+def test__parity__rust_leg_forces_legacy_native_ast():
+    """The ``rust`` leg must parse with the native-AST builder OFF regardless of
+    the ambient ``SQLFLUFF_RS_NATIVE_AST`` global.
+
+    Otherwise ``native_vs_legacy`` compares the native builder against itself
+    (vacuous, and every strict xfail pinned to that leg reports XPASS) and
+    ``python_vs_rust`` silently tests python-vs-native while claiming to test
+    the legacy convert+apply path. The flag the ``rust`` leg parses under must
+    be pinned to ``False`` by ``parse_capture`` itself, not left to the
+    environment.
+    """
+    from sqlfluff.core.parser import Lexer
+    from sqlfluff.core.parser.rust_parser import get_native_ast, set_native_ast
+
+    from . import compare
+
+    config = compare.build_config("ansi", None)
+    segments, _ = Lexer(config=config).lex("SELECT 1 FROM t")
+
+    seen = {}
+    real_parser_cls = compare.RustParser
+
+    class _SpyParser(real_parser_cls):
+        def parse(self, *args, **kwargs):
+            seen["native_at_parse"] = get_native_ast()
+            return super().parse(*args, **kwargs)
+
+    previous = get_native_ast()
+    set_native_ast(True)  # simulate SQLFLUFF_RS_NATIVE_AST=1
+    try:
+        compare.RustParser = _SpyParser
+        compare.parse_capture("rust", config, segments)
+    finally:
+        compare.RustParser = real_parser_cls
+        set_native_ast(previous)
+
+    assert seen["native_at_parse"] is False, (
+        "the 'rust' (legacy) leg parsed with the native-AST builder enabled - "
+        "parse_capture leaked the ambient native flag instead of forcing it off"
+    )
