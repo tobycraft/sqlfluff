@@ -170,12 +170,17 @@ materialize_curly_cross_silent_recovery:
 tsql_cast_structure:
   sql: select CAST(0X0 uniqueidentifier);
   dialect: tsql
-  xfail:
-    python_vs_rust: 'Rust does not recognise tsql''s AS-less CAST(literal type) shorthand
-      cast syntax: Python parses it as a function call with a binary_literal argument and
-      a data_type, while Rust parses only CAST as a bare column reference and folds the remainder
-      of the statement into an unparsable segment.'
-  pins: tsql CAST(literal type) shorthand (no AS) grammar gap.
+  expect: tree
+  pins: 'CastFunctionContentsSegment requires "AS" between the expression and the
+    data_type (Bracketed(ExpressionSegment, "AS", DatatypeSegment)), and this SQL
+    omits it, so the reference (Python) correctly rejects the CAST call and falls
+    back to a bare column_reference with the rest unparsable. bracketed.rs''s content
+    loop used to march on to the next content element even after a required
+    (non-optional) one failed to match, so with "AS" missing it let DatatypeSegment
+    try - and succeed - matching "uniqueidentifier" in the position "AS" should have
+    occupied, fabricating a function call Python never accepts. Fixed by stopping the
+    content loop the moment a required element fails, exactly like Python''s
+    Sequence.match.'
 materialize_webhook_overlapping_matches:
   sql: "(\n ) ( );\nCREATE SOURCE my_webhook_source IN CLUSTER my_cluster FROM WEBHOOK\n BODY\
     \ FORMAT JSON\n (\n (\n my_webhook_share"
