@@ -279,7 +279,7 @@ class RangePartitionDefinitionSegment(BaseSegment):
             Sequence(
                 Bracketed(
                     Bracketed(Delimited(Ref("LiteralGrammar"))),
-                    ",",
+                    Ref("CommaSegment"),
                     Bracketed(Delimited(Ref("LiteralGrammar"))),
                 )
             ),

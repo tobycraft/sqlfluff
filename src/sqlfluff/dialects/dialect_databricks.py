@@ -1886,7 +1886,7 @@ class CreateTableUsingStatementSegment(sparksql.CreateTableStatementSegment):
         Ref("TableSpecificationSegment", optional=True),
         Sequence(
             "USING",
-            Ref("DataSourceSegment"),
+            Ref("DataSourceFormatSegment"),
             optional=True,
         ),
         AnyNumberOf(Ref("TableClausesSegment")),
