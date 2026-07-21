@@ -3120,3 +3120,44 @@ class GrantStatementSegment(ansi.GrantStatementSegment):
             optional=True,
         ),
     )
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+redshift_dialect.sets("unreserved_keywords").update(
+    [
+        "ALLOW_CONNECTIONS",
+        "COMMUTATOR",
+        "CORRELATION",
+        "CURRENT_SESSION",
+        "DEPENDENCIES",
+        "FORMATS",
+        "HASHES",
+        "ICU",
+        "IS_SUPERUSER",
+        "IS_TEMPLATE",
+        "LC_COLLATE",
+        "LC_CTYPE",
+        "LEFTARG",
+        "LIBC",
+        "LOCALE",
+        "MCV",
+        "MERGES",
+        "NDISTINCT",
+        "NEGATOR",
+        "PERMISSIVE",
+        "POLICIES",
+        "PROVIDER",
+        "RESTRICTIVE",
+        "RIGHTARG",
+        "SERVER_ENCODING",
+        "SERVER_VERSION",
+        "SKIP_LOCKED",
+        "SUMMARY",
+        "TIMING",
+        "WAL",
+    ]
+)

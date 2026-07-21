@@ -134,11 +134,11 @@ class CreateTableStatementSegment(hive.CreateTableStatementSegment):
                 Sequence(
                     "CACHED",
                     "IN",
-                    Delimited(Ref("PoolNameReferenceSegment")),
+                    Delimited(Ref("QuotedLiteralSegment")),
                     Sequence(
                         "WITH",
                         "REPLICATION",
-                        "=",
+                        Ref("EqualsSegment"),
                         Ref("NumericLiteralSegment"),
                         optional=True,
                     ),
@@ -201,11 +201,11 @@ class CreateTableAsSelectStatementSegment(BaseSegment):
                 Sequence(
                     "CACHED",
                     "IN",
-                    Delimited(Ref("PoolNameReferenceSegment")),
+                    Delimited(Ref("QuotedLiteralSegment")),
                     Sequence(
                         "WITH",
                         "REPLICATION",
-                        "=",
+                        Ref("EqualsSegment"),
                         Ref("NumericLiteralSegment"),
                         optional=True,
                     ),

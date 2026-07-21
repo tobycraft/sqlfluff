@@ -269,7 +269,7 @@ class PartitionSegment(BaseSegment):
                                     Sequence(
                                         Bracketed(
                                             Bracketed(Delimited(Ref("LiteralGrammar"))),
-                                            ",",
+                                            Ref("CommaSegment"),
                                             Bracketed(Delimited(Ref("LiteralGrammar"))),
                                         )
                                     ),
@@ -636,3 +636,16 @@ class SelectStatementSegment(mysql.SelectStatementSegment):
         ],
         replace_terminators=True,
     )
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+starrocks_dialect.sets("unreserved_keywords").update(
+    [
+        "BITMAP",
+        "OPTIMIZER_COSTS",
+    ]
+)

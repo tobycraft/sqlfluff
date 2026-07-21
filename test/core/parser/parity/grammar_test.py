@@ -61,36 +61,7 @@ def _all_dialect_labels():
 # repro in test/fixtures/parity/regressions.yml before listing one here). Every
 # Ref in every dialect's expanded grammar must resolve; this stays empty unless a
 # future divergence needs a temporary, strictly-guarded exemption.
-_KNOWN_DANGLING_REF_DIALECTS: set = {
-    "ansi",
-    "athena",
-    "bigquery",
-    "clickhouse",
-    "databricks",
-    "db2",
-    "doris",
-    "duckdb",
-    "exasol",
-    "flink",
-    "greenplum",
-    "hive",
-    "impala",
-    "mariadb",
-    "materialize",
-    "mysql",
-    "oracle",
-    "postgres",
-    "redshift",
-    "snowflake",
-    "soql",
-    "sparksql",
-    "sqlite",
-    "starrocks",
-    "teradata",
-    "trino",
-    "tsql",
-    "vertica",
-}
+_KNOWN_DANGLING_REF_DIALECTS: set = set()
 
 
 def _dialect_param(label):

@@ -10775,3 +10775,26 @@ class CreateAuthenticationPolicySegment(BaseSegment):
             optional=True,
         ),
     )
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+snowflake_dialect.sets("unreserved_keywords").update(
+    [
+        "ASSIGNMENT",
+        "CONSTRUCTOR",
+        "EACH",
+        "INSTANCE",
+        "INSTEAD",
+        "METHOD",
+        "NEW",
+        "OLD",
+        "REFERENCING",
+        "SPECIFIC",
+        "STATIC",
+        "TIES",
+    ]
+)

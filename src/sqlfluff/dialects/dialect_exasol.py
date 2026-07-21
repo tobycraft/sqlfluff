@@ -148,7 +148,7 @@ exasol_dialect.patch_lexer_matchers(
             "inline_comment",
             r"--[^\n]*",
             CommentSegment,
-            segment_kwargs={"trim_start": ("--")},
+            segment_kwargs={"trim_start": ("--",)},
         ),
     ]
 )
@@ -3388,3 +3388,42 @@ class EmitsSegment(BaseSegment):
         "EMITS",
         Bracketed(Ref("UDFParameterGrammar")),
     )
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+exasol_dialect.sets("unreserved_keywords").update(
+    [
+        "AUTO_INCREMENT",
+        "BINDING",
+        "CACHE",
+        "FILTER",
+        "FORMATS",
+        "FUNCTIONS",
+        "INCREMENT",
+        "INSTEAD",
+        "MASKING",
+        "MATERIALIZED",
+        "MAXVALUE",
+        "MINVALUE",
+        "MODEL",
+        "NOCACHE",
+        "NOORDER",
+        "POLICIES",
+        "POLICY",
+        "PROCEDURES",
+        "ROUTINES",
+        "SEQUENCES",
+        "STAGE",
+        "STAGES",
+        "STREAM",
+        "STREAMS",
+        "TASK",
+        "TEMP",
+        "TRANSIENT",
+        "VIEWS",
+    ]
+)

@@ -66,7 +66,7 @@ flink_dialect.patch_lexer_matchers(
             "inline_comment",
             r"(--)[^\n]*",
             CommentSegment,
-            segment_kwargs={"trim_start": "--"},
+            segment_kwargs={"trim_start": ("--",)},
         ),
         # Support for backtick-quoted identifiers
         RegexLexer(
@@ -543,3 +543,15 @@ class DatatypeSegment(ansi.DatatypeSegment):
         # Include standard ANSI data types by inheriting parent match_grammar
         ansi.DatatypeSegment.match_grammar,
     )
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+flink_dialect.sets("unreserved_keywords").update(
+    [
+        "BUCKETS",
+    ]
+)

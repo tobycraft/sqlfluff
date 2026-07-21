@@ -4599,3 +4599,33 @@ class ValuesClauseSegment(BaseSegment):
             ),
         ),
     )
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+oracle_dialect.sets("unreserved_keywords").update(
+    [
+        "AUTHENTICATION",
+        "BUILD",
+        "COST",
+        "CREDENTIAL",
+        "EXCEPTIONS",
+        "FIREWALL",
+        "FOLDER",
+        "GRAINED",
+        "GRAPH",
+        "HASH",
+        "MANAGEMENT",
+        "METADATA",
+        "NOTIFICATION",
+        "RETENTION",
+        "SCALAR",
+        "SETTINGS",
+        "STEP",
+        "TUNING",
+        "TYPENAME",
+    ]
+)
