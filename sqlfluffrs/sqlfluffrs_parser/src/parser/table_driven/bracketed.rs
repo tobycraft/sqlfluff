@@ -453,6 +453,49 @@ impl Parser<'_> {
             // STRICT mode check: All content elements must end at the closing bracket position
             // This check should only happen AFTER all content elements have been processed.
             let check_pos = self.skip_start_index_forward_to_code(self.pos, self.tokens.len());
+
+            // PYTHON PARITY: a *required* content element that failed (empty
+            // match) means the content Sequence never completed. When that
+            // happens *after* earlier content already matched (a genuine
+            // partial match), a STRICT Bracketed must fail (return Empty)
+            // rather than match the closing bracket over the partial content -
+            // even when the failure lands exactly on the closing bracket, so
+            // the gap check below would otherwise fall through to MatchingClose
+            // and fabricate a partial match (e.g. tsql CAST(5), whose
+            // Bracketed(Expression, "AS", Datatype) would otherwise succeed
+            // with just the expression). Python's STRICT Sequence.match returns
+            // no match there.
+            //
+            // Crucially this is gated on content having actually matched
+            // (`last_matched_end > content_start`): a required element failing
+            // with *nothing* consumed is just an empty bracket - `()` - which
+            // is valid (e.g. tsql's `dbo.f()` table hint bracket
+            // Bracketed(TableHintSegment, ...) on empty parens), and Python
+            // accepts it, so we must not fail those.
+            let content_start = child_matches
+                .get(content_start_len.saturating_sub(1))
+                .map(|m| m.matched_slice.end)
+                .unwrap_or(check_pos);
+            let last_matched_end = child_matches
+                .iter()
+                .map(|m| m.matched_slice.end)
+                .max()
+                .unwrap_or(content_start);
+            if current_required_failed
+                && parse_mode == ParseMode::Strict
+                && last_matched_end > content_start
+            {
+                vdebug!(
+                    "Bracketed[table] STRICT mode: required content element failed after a partial match, returning Empty. frame_id={}, frame.pos={}",
+                    frame.frame_id, frame.pos
+                );
+                self.pos = frame.pos;
+                frame.end_pos = Some(frame.pos);
+                frame.state = FrameState::Combining;
+                stack.push(frame);
+                return Ok(TableFrameResult::Done);
+            }
+
             if let Some(expected_close_pos) = *bracket_max_idx {
                 if check_pos != expected_close_pos {
                     if parse_mode == ParseMode::Strict {
