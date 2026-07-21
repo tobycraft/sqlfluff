@@ -352,9 +352,27 @@ impl Parser<'_> {
                 self.tokens.len()
             );
 
+        // PYTHON PARITY: only an *optional* content element is allowed to fail
+        // and have the loop carry on to the next one unaffected (Python's
+        // Sequence.match: `if elem.is_optional(): continue`). A *required*
+        // element failing (empty match) must stop the content sequence right
+        // here, exactly like Python returns immediately from that failed
+        // element - not march on and let a later element match at the same,
+        // still-unclaimed position (e.g. tsql's Bracketed(Expression, "AS",
+        // Datatype) content: if "AS" is missing, DatatypeSegment must not be
+        // allowed to try matching where "AS" was expected). Falling through
+        // (rather than returning here) lets the closing-bracket gap-check
+        // below turn this into the same "to start sequence"/"after X"
+        // unparsable Python would produce.
+        let current_required_failed = child_is_empty
+            && !self
+                .grammar_ctx
+                .inst(content_ids[*content_idx])
+                .is_optional();
+
         // CRITICAL: Check if there are more content elements to parse
         // Continue parsing even if current element returned Empty (optional elements)
-        if *content_idx + 1 < content_ids.len() {
+        if !current_required_failed && *content_idx + 1 < content_ids.len() {
             // More content elements remain - parse the next one
             *content_idx += 1;
 
