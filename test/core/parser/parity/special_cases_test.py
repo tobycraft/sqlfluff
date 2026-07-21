@@ -13,8 +13,6 @@ import sys
 import weakref
 from pathlib import Path
 
-import pytest
-
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -57,12 +55,6 @@ def test__parity__codegen_grammar_cache_pins_against_gc():
     )
 
 
-@pytest.mark.xfail(
-    reason="tsql's currency_symbols set is joined without sorting first, so "
-    "the money-literal lexer pattern's byte content varies with the "
-    "interpreter's hash seed.",
-    strict=True,
-)
 def test__parity__codegen_lexer_patterns_hash_seed_stable():
     """Dialect lexer regexes are byte-identical across interpreter hash seeds.
 
