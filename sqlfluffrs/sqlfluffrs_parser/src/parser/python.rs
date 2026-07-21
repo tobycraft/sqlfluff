@@ -647,7 +647,7 @@ impl PyParser {
 ///
 /// This is necessary when tokens come from Python (via PyToken -> Token conversion)
 /// because the Python lexer doesn't compute these indices.
-fn compute_bracket_pairs(tokens: &mut [Token], bracket_pairs: &[(&str, &str)]) {
+fn compute_bracket_pairs(tokens: &mut [Token], bracket_pairs: &[(&str, &str, &str, &str, bool)]) {
     // Stack to track opening brackets: (index, bracket-pair-type index)
     let mut bracket_stack: Vec<(usize, usize)> = Vec::new();
 
@@ -662,11 +662,12 @@ fn compute_bracket_pairs(tokens: &mut [Token], bracket_pairs: &[(&str, &str)]) {
         let raw = tokens[idx].raw();
 
         // Check if this is an opening bracket
-        if let Some(pair_idx) = bracket_pairs.iter().position(|(open, _)| *open == raw) {
+        if let Some(pair_idx) = bracket_pairs.iter().position(|(open, _, _, _, _)| *open == raw) {
             bracket_stack.push((idx, pair_idx));
         }
         // Check if this is a closing bracket
-        else if let Some(expected_idx) = bracket_pairs.iter().position(|(_, close)| *close == raw)
+        else if let Some(expected_idx) =
+            bracket_pairs.iter().position(|(_, close, _, _, _)| *close == raw)
         {
             // Only the most-recently-opened bracket (the top of the stack) may
             // be closed next, per LIFO nesting discipline. See the sibling

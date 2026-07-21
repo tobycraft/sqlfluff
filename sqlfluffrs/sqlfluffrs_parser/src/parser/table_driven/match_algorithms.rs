@@ -113,14 +113,14 @@ fn find_mismatched_closing_bracket(
     tokens: &[Token],
     from_idx: usize,
     open_idx: usize,
-    bracket_pairs: &[(&str, &str)],
+    bracket_pairs: &[(&str, &str, &str, &str, bool)],
 ) -> BracketScanResult {
     let mut idx = from_idx;
     let mut innermost_idx = open_idx;
     let mut open_raw = tokens[open_idx].raw().to_string();
     while idx < tokens.len() {
         let raw = tokens[idx].raw();
-        if bracket_pairs.iter().any(|(open, _)| *open == raw) {
+        if bracket_pairs.iter().any(|(open, _, _, _, _)| *open == raw) {
             match tokens[idx].matching_bracket_idx {
                 Some(matching_idx) => idx = matching_idx + 1,
                 None => {
@@ -129,7 +129,7 @@ fn find_mismatched_closing_bracket(
                     idx += 1;
                 }
             }
-        } else if bracket_pairs.iter().any(|(_, close)| *close == raw) {
+        } else if bracket_pairs.iter().any(|(_, close, _, _, _)| *close == raw) {
             return BracketScanResult::Mismatch {
                 idx,
                 actual_close: raw.to_string(),
@@ -201,7 +201,7 @@ impl Parser<'_> {
     ) -> Result<(usize, usize), ParseError> {
         let tokens = self.tokens;
         let tokens_len = tokens.len();
-        let bracket_pairs: &[(&str, &str)] = self.dialect.get_bracket_pairs();
+        let bracket_pairs: &[(&str, &str, &str, &str, bool)] = self.dialect.get_bracket_pairs();
 
         if start_idx >= tokens_len {
             return Ok((tokens_len, tokens_len));
@@ -237,7 +237,7 @@ impl Parser<'_> {
         while i < max_idx {
             let token = &tokens[i];
             let raw = token.raw();
-            if bracket_pairs.iter().any(|(open, _)| *open == raw) {
+            if bracket_pairs.iter().any(|(open, _, _, _, _)| *open == raw) {
                 if let Some(matching_idx) = token.matching_bracket_idx {
                     vdebug!(
                         "[GREEDY_MATCH_TABLE] greedy_match: skipping bracket at {} to {}",
@@ -261,8 +261,8 @@ impl Parser<'_> {
                         } => {
                             let expected_close = bracket_pairs
                                 .iter()
-                                .find(|(open, _)| *open == expected_open)
-                                .map(|(_, close)| *close)
+                                .find(|(open, _, _, _, _)| *open == expected_open)
+                                .map(|(_, close, _, _, _)| *close)
                                 .expect("expected_open is always a registered bracket opener");
                             vdebug!(
                                 "[GREEDY_MATCH_TABLE] greedy_match: mismatched closing bracket '{}' at {} for opening bracket at {} (expected '{}')",
@@ -300,7 +300,7 @@ impl Parser<'_> {
             // bracket! Return no match": abort the terminator search and
             // claim everything through max_idx, rather than scan past the
             // stray bracket to a later terminator like `FROM` or `UNION`.
-            if bracket_pairs.iter().any(|(_, close)| *close == raw) {
+            if bracket_pairs.iter().any(|(_, close, _, _, _)| *close == raw) {
                 vdebug!(
                     "[GREEDY_MATCH_TABLE] greedy_match: unexpected closing bracket at {} — aborting terminator search, claiming through {}",
                     i, max_idx

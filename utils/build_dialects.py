@@ -95,7 +95,7 @@ impl Dialect {{
         }}
     }}
 
-    pub fn get_bracket_pairs(&self) -> &'static Vec<(&'static str, &'static str)> {{
+    pub fn get_bracket_pairs(&self) -> &'static Vec<(&'static str, &'static str, &'static str, &'static str, bool)> {{
         match self {{
             {dialect_bracket_pairs},
         }}

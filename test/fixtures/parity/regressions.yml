@@ -1,6 +1,25 @@
 # Parity test cases - data for test/core/parser/parity/cases_test.py.
 # See test/fixtures/parity/README.md for the schema and strictness contract.
 
+anything_dialect_exclude_bracket:
+  sql: CREATE TABLE t (c VARCHAR({- 1 -}) AS y)
+  dialect: snowflake
+  expect: tree
+  pins: The Anything-grammar bracket path (core.rs match_bracket_recursively,
+    reached here via snowflake's Bracketed(Anything()) column-datatype params)
+    hardcoded the ASCII trio '('/'['/'{' for opener recognition, close-bracket
+    mapping, leaf segment types and the persists flag. A dialect-specific
+    bracket routed through it - snowflake's exclude bracket '{-'/'-}' - was
+    bumped as a plain token where Python's resolve_bracket recognises it. Now
+    the whole path uses the dialect's bracket_pairs set (open, close, start/end
+    segment type, persists), so '{-' is recognised, typed start_exclude_bracket
+    and kept as a structured `bracketed` node (persists=True), matching Python.
+anything_dialect_exclude_bracket_unclosed:
+  sql: CREATE TABLE t (c NUMBER({- x) AS y)
+  dialect: snowflake
+  pins: Unclosed dialect exclude bracket inside an Anything region; both engines
+    handle the crossed/unclosed '{-' identically now that the Anything bracket
+    path recognises the dialect's bracket set.
 anything_crossed_ascii_bracket_raises:
   sql: CREATE TABLE t (col VARCHAR(x ( y ] z )))
   expect: error

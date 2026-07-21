@@ -222,13 +222,17 @@ impl SQLLexError {
 /// PYTHON PARITY: matches `Dialect`'s base `bracket_pairs` set
 /// (dialect_ansi.py) before any dialect-specific additions (e.g. snowflake's
 /// MATCH_RECOGNIZE exclude bracket `{-`/`-}`, added to that same set).
-const DEFAULT_BRACKET_PAIRS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")];
+const DEFAULT_BRACKET_PAIRS: &[(&str, &str, &str, &str, bool)] = &[
+    ("(", ")", "start_bracket", "end_bracket", true),
+    ("[", "]", "start_square_bracket", "end_square_bracket", false),
+    ("{", "}", "start_curly_bracket", "end_curly_bracket", false),
+];
 
 #[derive(Clone)]
 pub struct Lexer {
     last_resort_lexer: LexMatcher,
     matchers: Vec<LexMatcher>,
-    bracket_pairs: Vec<(&'static str, &'static str)>,
+    bracket_pairs: Vec<(&'static str, &'static str, &'static str, &'static str, bool)>,
 }
 
 impl Lexer {
@@ -254,7 +258,10 @@ impl Lexer {
     /// Override the bracket-pairs set used for `matching_bracket_idx`
     /// pre-computation, e.g. with a dialect's full `bracket_pairs` set
     /// (round/square/curly plus any dialect-specific additions).
-    pub fn with_bracket_pairs(mut self, bracket_pairs: Vec<(&'static str, &'static str)>) -> Self {
+    pub fn with_bracket_pairs(
+        mut self,
+        bracket_pairs: Vec<(&'static str, &'static str, &'static str, &'static str, bool)>,
+    ) -> Self {
         self.bracket_pairs = bracket_pairs;
         self
     }
@@ -405,14 +412,18 @@ impl Lexer {
             let raw = tokens[idx].raw();
 
             // Check if this is an opening bracket
-            if let Some(pair_idx) = self.bracket_pairs.iter().position(|(open, _)| *open == raw) {
+            if let Some(pair_idx) = self
+                .bracket_pairs
+                .iter()
+                .position(|(open, _, _, _, _)| *open == raw)
+            {
                 bracket_stack.push((idx, pair_idx));
             }
             // Check if this is a closing bracket
             else if let Some(expected_idx) = self
                 .bracket_pairs
                 .iter()
-                .position(|(_, close)| *close == raw)
+                .position(|(_, close, _, _, _)| *close == raw)
             {
                 // Only the most-recently-opened bracket (the top of the stack)
                 // may be closed next, per LIFO nesting discipline. This matches
