@@ -53,14 +53,9 @@ impl<'a> GrammarContext<'a> {
         // (helpers/string.py curtail_string: `s[:n] + "..."` when longer).
         // These reprs surface verbatim in user-visible UnparsableSegment
         // "Expected:" messages, so the truncation must match byte-for-byte.
+        // curtail_string(s, n) keeps n and truncates past n.
         fn curtail(s: String, n: usize) -> String {
-            if s.chars().count() > n {
-                let mut out: String = s.chars().take(n).collect();
-                out.push_str("...");
-                out
-            } else {
-                s
-            }
+            crate::string::ellipsize(&s, n, n)
         }
         if id == GrammarId::NONCODE {
             return "NONCODE".to_string();
