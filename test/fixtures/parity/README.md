@@ -81,3 +81,7 @@ Case fields:
   dialect fixture at the same strictness.
 - `test/core/parser/parity/grammar_test.py` - confirms every ref in each
   dialect's expanded grammar resolves to a real target.
+- `test/core/parser/parity/special_cases_test.py` - parity-adjacent checks
+  that need Python-side instrumentation rather than a plain SQL-plus-config
+  case, e.g. codegen object-lifetime and hash-seed-stability probes on
+  `utils/build_parsers.py`/`utils/build_lexers.py`.
