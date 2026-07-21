@@ -781,7 +781,7 @@ class AlterTableStatementSegment(mysql.AlterTableStatementSegment):
             Sequence(
                 "WITH",
                 "TABLE",
-                Ref("TableReference"),
+                Ref("TableReferenceSegment"),
                 OneOf("WITH", "WITHOUT"),
                 "VALIDATION",
                 optional=True,

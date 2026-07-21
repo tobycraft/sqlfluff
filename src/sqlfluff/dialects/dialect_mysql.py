@@ -2216,7 +2216,7 @@ class AlterTableStatementSegment(BaseSegment):
             Sequence(
                 "WITH",
                 "TABLE",
-                Ref("TableReference"),
+                Ref("TableReferenceSegment"),
                 OneOf("WITH", "WITHOUT"),
                 "VALIDATION",
                 optional=True,
