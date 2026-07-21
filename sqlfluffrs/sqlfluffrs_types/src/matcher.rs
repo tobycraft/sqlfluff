@@ -52,7 +52,7 @@ pub struct LexMatcher {
     pub trim_start: Option<Vec<String>>,
     pub trim_chars: Option<Vec<String>>,
     pub quoted_value: Option<(String, RegexModeGroup)>,
-    pub escape_replacements: Option<(String, String)>,
+    pub escape_replacements: Option<Vec<(String, String)>>,
     pub casefold: CaseFold,
     pub kwarg_type: Option<String>,
 }
@@ -66,7 +66,7 @@ pub struct LexMatcherConfig {
     pub trim_start: Option<Vec<String>>,
     pub trim_chars: Option<Vec<String>>,
     pub quoted_value: Option<(String, RegexModeGroup)>,
-    pub escape_replacements: Option<(String, String)>,
+    pub escape_replacements: Option<Vec<(String, String)>>,
     pub casefold: CaseFold,
     pub kwarg_type: Option<String>,
 }
@@ -323,7 +323,7 @@ impl LexMatcher {
                 trim_start: self.trim_start.clone(),
                 trim_chars: self.trim_chars.clone(),
                 quoted_value: self.quoted_value.clone(),
-                escape_replacement: self.escape_replacements.clone(),
+                escape_replacements: self.escape_replacements.clone(),
                 casefold: self.casefold,
             },
         )
