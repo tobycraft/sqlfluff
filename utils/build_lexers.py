@@ -39,6 +39,30 @@ def generate_lexer(dialect: str):
     print("]});")
 
 
+def generate_bracket_pairs(dialect: str):
+    """Generate the (open, close) raw-text bracket pairs for a dialect.
+
+    Used by the Rust lexer/parser's bracket-matching (`matching_bracket_idx`
+    pre-computation and the parser's stray-closing-bracket detection) so
+    dialect-specific brackets - e.g. snowflake's MATCH_RECOGNIZE exclude
+    bracket `{-`/`-}`, added to the same `bracket_pairs` set as round/square
+    /curly - are recognised identically to the universal three.
+    """
+    loaded_dialect = dialect_selector(dialect)
+    print(
+        f"pub static {dialect.upper()}_BRACKET_PAIRS:"
+        " Lazy<Vec<(&'static str, &'static str)>> = Lazy::new(|| {"
+        " vec!["
+    )
+    for _bracket_type, start_ref, end_ref, _persists in sorted(
+        loaded_dialect.bracket_sets("bracket_pairs")
+    ):
+        start_template = loaded_dialect.ref(start_ref).template
+        end_template = loaded_dialect.ref(end_ref).template
+        print(f'    ("{start_template}", "{end_template}"),')
+    print("]});")
+
+
 def generate_reserved_keyword_list(dialect: str):
     """Generate the keywords for a dialects."""
     loaded_dialect = dialect_selector(dialect)
@@ -249,5 +273,7 @@ if __name__ == "__main__":
     generate_reserved_keyword_list(args.dialect)
     print()
     generate_lexer(args.dialect)
+    print()
+    generate_bracket_pairs(args.dialect)
     print()
     generate_extract_nested_block_comments(args.dialect)

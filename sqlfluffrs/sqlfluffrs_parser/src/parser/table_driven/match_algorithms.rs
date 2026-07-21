@@ -74,12 +74,12 @@ fn try_match_grammar(
 /// `open_idx` is eventually accounted for.
 enum BracketScanResult {
     /// A closer of the wrong type was found. `idx` is its position,
-    /// `actual_close` its raw text, and `expected_open` the type of the
+    /// `actual_close` its raw text, and `expected_open` the raw text of the
     /// innermost still-open bracket it should have closed instead.
     Mismatch {
         idx: usize,
         actual_close: String,
-        expected_open: char,
+        expected_open: String,
     },
     /// Nothing closed it before `tokens.len()`. `idx` is the innermost
     /// still-open bracket at that point, i.e. the one Python's recursive
@@ -104,37 +104,39 @@ enum BracketScanResult {
 /// (`resolve_bracket`, match_algorithms.py): "Couldn't find closing bracket
 /// for opening bracket" (genuinely unclosed) vs. "Found unexpected end
 /// bracket!, was expecting X, but got Y" (closed by the wrong type).
+///
+/// `bracket_pairs` is the dialect's full bracket-pairs set (see
+/// `Dialect::get_bracket_pairs`) so dialect-specific brackets (e.g.
+/// snowflake's MATCH_RECOGNIZE exclude bracket `{-`/`-}`) are recognised
+/// identically to round/square/curly, not just the universal ASCII trio.
 fn find_mismatched_closing_bracket(
     tokens: &[Token],
     from_idx: usize,
     open_idx: usize,
+    bracket_pairs: &[(&str, &str)],
 ) -> BracketScanResult {
     let mut idx = from_idx;
     let mut innermost_idx = open_idx;
-    let mut open_char = tokens[open_idx]
-        .raw()
-        .chars()
-        .next()
-        .expect("bracket raw is non-empty");
+    let mut open_raw = tokens[open_idx].raw().to_string();
     while idx < tokens.len() {
         let raw = tokens[idx].raw();
-        match raw {
-            "(" | "[" | "{" => match tokens[idx].matching_bracket_idx {
+        if bracket_pairs.iter().any(|(open, _)| *open == raw) {
+            match tokens[idx].matching_bracket_idx {
                 Some(matching_idx) => idx = matching_idx + 1,
                 None => {
                     innermost_idx = idx;
-                    open_char = raw.chars().next().expect("bracket raw is non-empty");
+                    open_raw = raw.to_string();
                     idx += 1;
                 }
-            },
-            ")" | "]" | "}" => {
-                return BracketScanResult::Mismatch {
-                    idx,
-                    actual_close: raw.to_string(),
-                    expected_open: open_char,
-                };
             }
-            _ => idx += 1,
+        } else if bracket_pairs.iter().any(|(_, close)| *close == raw) {
+            return BracketScanResult::Mismatch {
+                idx,
+                actual_close: raw.to_string(),
+                expected_open: open_raw,
+            };
+        } else {
+            idx += 1;
         }
     }
     BracketScanResult::Unclosed { idx: innermost_idx }
@@ -199,6 +201,7 @@ impl Parser<'_> {
     ) -> Result<(usize, usize), ParseError> {
         let tokens = self.tokens;
         let tokens_len = tokens.len();
+        let bracket_pairs: &[(&str, &str)] = self.dialect.get_bracket_pairs();
 
         if start_idx >= tokens_len {
             return Ok((tokens_len, tokens_len));
@@ -234,7 +237,7 @@ impl Parser<'_> {
         while i < max_idx {
             let token = &tokens[i];
             let raw = token.raw();
-            if raw == "(" || raw == "[" || raw == "{" {
+            if bracket_pairs.iter().any(|(open, _)| *open == raw) {
                 if let Some(matching_idx) = token.matching_bracket_idx {
                     vdebug!(
                         "[GREEDY_MATCH_TABLE] greedy_match: skipping bracket at {} to {}",
@@ -250,18 +253,17 @@ impl Parser<'_> {
                     // message for the true unclosed-to-EOF case. Either way,
                     // blame the innermost still-open bracket, matching
                     // resolve_bracket's own recursive call.
-                    match find_mismatched_closing_bracket(tokens, i + 1, i) {
+                    match find_mismatched_closing_bracket(tokens, i + 1, i, bracket_pairs) {
                         BracketScanResult::Mismatch {
                             idx: mismatch_idx,
                             actual_close,
                             expected_open,
                         } => {
-                            let expected_close = match expected_open {
-                                '(' => ")",
-                                '[' => "]",
-                                '{' => "}",
-                                _ => unreachable!("expected_open is always a bracket character"),
-                            };
+                            let expected_close = bracket_pairs
+                                .iter()
+                                .find(|(open, _)| *open == expected_open)
+                                .map(|(_, close)| *close)
+                                .expect("expected_open is always a registered bracket opener");
                             vdebug!(
                                 "[GREEDY_MATCH_TABLE] greedy_match: mismatched closing bracket '{}' at {} for opening bracket at {} (expected '{}')",
                                 actual_close, mismatch_idx, i, expected_close
@@ -298,7 +300,7 @@ impl Parser<'_> {
             // bracket! Return no match": abort the terminator search and
             // claim everything through max_idx, rather than scan past the
             // stray bracket to a later terminator like `FROM` or `UNION`.
-            if raw == ")" || raw == "]" || raw == "}" {
+            if bracket_pairs.iter().any(|(_, close)| *close == raw) {
                 vdebug!(
                     "[GREEDY_MATCH_TABLE] greedy_match: unexpected closing bracket at {} — aborting terminator search, claiming through {}",
                     i, max_idx
