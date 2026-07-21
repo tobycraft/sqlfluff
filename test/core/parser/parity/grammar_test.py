@@ -16,17 +16,33 @@ repros for the fixed refs are pinned in
 import pytest
 
 
+def _child_matchables(value):
+    """Yield the Matchable(s) a grammar attribute holds, if any.
+
+    A grammar stores its children as a Matchable (``exclude``, ``delimiter``,
+    ``start_bracket`` ...) or in a list/tuple/set of them (``_elements``,
+    ``terminators`` ...). Everything else (flags, strings, parse-context bits)
+    is skipped.
+    """
+    from sqlfluff.core.parser.matchable import Matchable
+
+    if isinstance(value, Matchable):
+        yield value
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _child_matchables(item)
+
+
 def _iter_grammar(g, seen):
     if id(g) in seen:
         return
     seen.add(id(g))
     yield g
-    for attr in ("_elements", "terminators"):
-        for child in getattr(g, attr, ()) or ():
-            yield from _iter_grammar(child, seen)
-    for attr in ("exclude", "delimiter", "start_bracket", "end_bracket"):
-        child = getattr(g, attr, None)
-        if child is not None:
+    # Introspect every instance attribute rather than hand-listing the
+    # child-holding ones, so a Ref tucked into a new grammar attribute is still
+    # audited instead of silently skipped.
+    for value in vars(g).values() if hasattr(g, "__dict__") else ():
+        for child in _child_matchables(value):
             yield from _iter_grammar(child, seen)
 
 
