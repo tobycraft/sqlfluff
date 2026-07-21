@@ -105,13 +105,18 @@ partial_match_failure_keeps_children:
 stray_closing_bracket_dialect_bracket_set:
   sql: SELECT 1 -} FROM t
   dialect: snowflake
-  xfail:
-    python_vs_rust: 'Rust''s unparsable-recovery region for the unmatched dialect-specific
-      closing bracket (snowflake''s exclude-bracket ''-}'') does not stop at the bracket:
-      it keeps consuming subsequent tokens (FROM, the table reference) as raw words inside
-      the same unparsable segment, where Python recovers immediately after the stray bracket
-      and parses the FROM clause normally.'
-  pins: Dialect-specific stray closing bracket (snowflake '-}') recovery never closes.
+  expect: tree
+  pins: 'Rust''s bracket-matching (the lexer''s matching_bracket_idx pre-computation
+    in sqlfluffrs_lexer and sqlfluffrs_parser/python.rs, plus greedy_match''s
+    stray-closing-bracket abort in match_algorithms.rs) only recognised the
+    universal round/square/curly brackets by hardcoded ASCII text, so it missed
+    dialect-specific entries in a dialect''s bracket_pairs set - here snowflake''s
+    MATCH_RECOGNIZE exclude bracket ''{-''/''-}'' - and kept scanning past the stray
+    ''-}'' instead of aborting the terminator search there like Python''s
+    next_ex_bracket_match/resolve_bracket do. Fixed by generating each dialect''s
+    full bracket_pairs set (Dialect::get_bracket_pairs, from utils/build_lexers.py)
+    and threading it through both the lexer''s bracket pre-computation and
+    greedy_match''s bracket checks, instead of a hardcoded three-pair list.'
 int_typed_indentation_config:
   sql: SELECT a FROM t JOIN u USING (a)
   configs:
