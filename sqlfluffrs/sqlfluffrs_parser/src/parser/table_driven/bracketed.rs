@@ -139,7 +139,6 @@ impl Parser<'_> {
             content_idx,
             parse_mode_override,
             child_matches,
-            content_start_len,
             ..
         }) = &mut frame.context
         else {
@@ -168,7 +167,6 @@ impl Parser<'_> {
         );
 
         child_matches.push(Arc::clone(child_match));
-        *content_start_len = child_matches.len();
         let content_start_idx = *child_end_pos;
         // Compute bracket_max_idx from the opening bracket's token position
         let computed_bracket_max_idx = if !child_match.matched_slice.is_empty() {
@@ -308,7 +306,6 @@ impl Parser<'_> {
             content_idx,
             parse_mode_override,
             child_matches,
-            content_start_len,
             ..
         }) = &mut frame.context
         else {
@@ -472,8 +469,10 @@ impl Parser<'_> {
             // is valid (e.g. tsql's `dbo.f()` table hint bracket
             // Bracketed(TableHintSegment, ...) on empty parens), and Python
             // accepts it, so we must not fail those.
+            // Content starts at the end of the opening bracket, which is always
+            // the first recorded child match.
             let content_start = child_matches
-                .get(content_start_len.saturating_sub(1))
+                .first()
                 .map(|m| m.matched_slice.end)
                 .unwrap_or(check_pos);
             let last_matched_end = child_matches
@@ -542,10 +541,6 @@ impl Parser<'_> {
                             // so gate on `current_required_failed` (a REQUIRED empty
                             // match), not merely `child_is_empty`, or an optional
                             // element's failure wrongly produces the specific message.
-                            // `child_matches.len() == *content_start_len` checks
-                            // whether any *content* element (as opposed to the
-                            // opening bracket, which is always in `child_matches`
-                            // by this point) has matched yet.
                             let specific_message = if current_required_failed {
                                 content_ids.get(*content_idx).map(|&gid| {
                                     let element_desc = self.grammar_ctx.grammar_repr(gid);
@@ -567,11 +562,12 @@ impl Parser<'_> {
                                     // insert-only match (zero-length Indent/
                                     // Conditional) bumps the count but not the
                                     // position. `content_start` is where content
-                                    // began (end of the opening bracket);
+                                    // began (end of the opening bracket, always
+                                    // the first recorded child match);
                                     // `last_matched_end` is the furthest content
                                     // match so far (Python's matched_idx).
                                     let content_start = child_matches
-                                        .get(content_start_len.saturating_sub(1))
+                                        .first()
                                         .map(|m| m.matched_slice.end)
                                         .unwrap_or(check_pos);
                                     let last_matched_end = child_matches
@@ -821,7 +817,6 @@ fn initialize_bracketed_frame(
         content_idx: 0,
         parse_mode_override: None, // Will be set when creating content frames
         child_matches: Vec::new(),
-        content_start_len: 0, // Set once the opening bracket is recorded
     });
     frame.table_terminators = SmallVec::from_slice(all_terminators);
     stack.push(frame);
