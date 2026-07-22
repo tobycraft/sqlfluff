@@ -6,16 +6,17 @@
 .DESCRIPTION
     For each commit in (BaseCommit..original HEAD], oldest first:
       1. git checkout <commit>
-      2. pip install -e ./sqlfluffrs/   (rebuild + install the Rust extension)
-      3. pytest test/                   (run the full suite)
+      2. uv pip install -e ./sqlfluffrs/   (rebuild + install the Rust extension)
+      3. uv run pytest test/               (run the full suite)
     stdout/stderr from every step is appended to -LogFile, tagged with the
     commit hash/subject and a pass/fail marker. A build or test failure does
     not stop the walk - it's logged and the script moves to the next commit.
     The original branch/commit is checked back out when the walk finishes.
 
-    Run this with an activated Python venv that already has `pip install -e .`
-    done for the main package - this script only rebuilds the Rust extension
-    per commit, not the Python package itself.
+    Requires `uv` on PATH. Run this with an activated Python venv that
+    already has `uv pip install -e .` done for the main package - this
+    script only rebuilds the Rust extension per commit, not the Python
+    package itself.
 
 .PARAMETER BaseCommit
     Commit to start after (exclusive). Defaults to ab292785.
@@ -55,14 +56,14 @@ foreach ($Commit in $Commits) {
     git checkout --force $Commit *>> $LogFile
 
     $BuildOk = $true
-    python -m pip install -e ./sqlfluffrs/ *>> $LogFile
+    uv pip install -e ./sqlfluffrs/ *>> $LogFile
     if ($LASTEXITCODE -ne 0) {
         $BuildOk = $false
         Add-Content -Path $LogFile -Value "--- BUILD FAILED (exit $LASTEXITCODE), skipping tests for $Commit ---"
     }
 
     if ($BuildOk) {
-        python -m pytest test/ *>> $LogFile
+        uv run pytest test/ *>> $LogFile
         $TestExit = $LASTEXITCODE
         Add-Content -Path $LogFile -Value "--- RESULT for $Commit`: pytest exit $TestExit ---"
     }
