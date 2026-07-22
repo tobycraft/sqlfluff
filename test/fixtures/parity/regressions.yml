@@ -56,11 +56,6 @@ ansi_grant_all_masking_policies:
     which was not found in the ansi dialect...") - Python via dialect.ref(), Rust
     by signalling the missing ref to rust_parser.py which re-raises through the
     same dialect.ref(). (Previously Rust silently produced an unparsable tree.)
-ansi_grant_future_masking_policies:
-  sql: GRANT SELECT ON FUTURE MASKING POLICIES IN SCHEMA s TO r
-  expect: error
-  pins: FUTURE variant of the same POLICIES dangling-keyword-ref case; both
-    engines raise the identical RuntimeError.
 ansi_grant_all_file_formats:
   sql: GRANT SELECT ON ALL FILE FORMATS IN SCHEMA s TO r
   expect: error
