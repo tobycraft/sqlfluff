@@ -280,7 +280,7 @@ try:
                         # here rather than raising. Raise ourselves so the
                         # user never sees the raw sentinel text.
                         dialect_obj.ref(ref_name)
-                        raise RuntimeError(
+                        raise RuntimeError(  # pragma: no cover
                             "Grammar refers to {!r} which is registered in "
                             "the {} dialect's Python library but missing "
                             "from its Rust parser tables. This is an "
@@ -397,7 +397,7 @@ try:
                     )
                     if _prof is not None:
                         _prof["apply_as_tree"] = time.perf_counter() - _ts
-                except (KeyboardInterrupt, SystemExit):
+                except (KeyboardInterrupt, SystemExit):  # pragma: no cover
                     # Never swallow interpreter control-flow exceptions.
                     raise
                 except BaseException:  # noqa: BLE001  # pragma: no cover
