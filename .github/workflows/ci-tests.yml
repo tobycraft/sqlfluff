@@ -11,9 +11,6 @@ name: CI
 
 on:
   workflow_dispatch:
-  schedule:
-    # 2am each night
-    - cron: '00 2 * * *'
   # Don't use pull_request_target here. See:
   # https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
   pull_request:
