@@ -134,3 +134,32 @@ def test__main__coverage_out_of_range_rejected_by_cli():
                 "101",
             ]
         )
+
+
+def test__main__vocab_warnings_print_once_per_segment(capsys):
+    """A given "no vocab entry for" name should print at most once per run.
+
+    Not once per occurrence - at high coverage the same gap can otherwise be
+    hit hundreds of times in one run (confirmed: this exact scenario went
+    from 6679 stderr lines to 134 once deduped).
+    """
+    main(
+        [
+            "--dialect",
+            "postgres",
+            "--segment",
+            "SelectStatementSegment",
+            "--coverage",
+            "100",
+            "--max-examples",
+            "40",
+            "--skip-self-check",
+        ]
+    )
+    warning_lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if "no vocab entry for" in line
+    ]
+    assert warning_lines, "expected at least one vocab-gap warning in this scenario"
+    assert len(warning_lines) == len(set(warning_lines))

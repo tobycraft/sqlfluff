@@ -161,6 +161,17 @@ that the old shallow generation never surfaced. No crashes across all 28
 dialects at `--coverage 50`/`100`, and a worst-case self-referential entry point
 (`ExpressionSegment` at `--coverage 100`) still completes in ~1s.
 
+**Vocab-gap warnings deduped per segment.** Higher coverage means many more
+walks per `generate()` call, and `_terminal_for`'s "no vocab entry for X"
+notice was printed on every single occurrence, not once per distinct `X` -
+fine at `coverage=0`'s handful of walks, unusable at `coverage=100` (one real
+run: 6679 stderr lines, almost all exact repeats of names already seen).
+Fixed by threading a `warned: set[str]` through `_WalkState` the same way
+`known` already is - shared across every walk in one `generate()` call
+(including `_branch_score`'s scoring probes, which hit the same terminals and
+would otherwise warn into a separate, discarded set) - so each gap name
+prints at most once per segment. Same run: 134 lines, one per distinct name.
+
 **Deliberately deferred, not part of what shipped:**
 - Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").
 - Base-vs-head generation to filter pre-existing issues surfaced via shared/

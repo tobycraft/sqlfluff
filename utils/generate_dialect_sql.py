@@ -107,14 +107,15 @@ class GenerationError(Exception):
     """Raised when the requested entry point can't be resolved."""
 
 
-def _terminal_for(name: Optional[str]) -> str:
+def _terminal_for(name: Optional[str], warned: set[str]) -> str:
     if name and name in TERMINAL_VOCAB:
         return TERMINAL_VOCAB[name]
     if name:
         for suffix, value in SUFFIX_VOCAB:
             if name.endswith(suffix):
                 return value
-    if name:
+    if name and name not in warned:
+        warned.add(name)
         print(
             f"[generate_dialect_sql] no vocab entry for {name!r}, "
             f"using fallback {DEFAULT_FALLBACK!r}",
@@ -159,6 +160,10 @@ class _WalkState:
     dialect: Dialect
     max_depth: int
     known: dict[tuple[str, int], _Candidate]
+    # Vocab-gap names already warned about - shared across every walk in one
+    # `generate()` call (like `known`), so each gap prints once per segment
+    # rather than once per occurrence.
+    warned: set[str] = field(default_factory=set)
     target_indices: frozenset[int] = frozenset()
     collecting: bool = False
     new_candidates: list[_Candidate] = field(default_factory=list)
@@ -200,14 +205,14 @@ def _render(
     if isinstance(matchable, Ref):
         name = matchable._ref
         if name in active_refs or depth >= state.max_depth:
-            return [_terminal_for(name)]
+            return [_terminal_for(name, state.warned)]
         try:
             target = dialect.ref(name)
         except (ValueError, RuntimeError):
             # Some keyword/grammar names are only wired up for certain
             # dialects (e.g. a shared grammar referencing a keyword that
             # one dialect doesn't define) - treat as unresolvable.
-            return [_terminal_for(name)]
+            return [_terminal_for(name, state.warned)]
         return _render(target, dialect, name, depth + 1, active_refs | {name}, state)
 
     if isinstance(matchable, type) and issubclass(matchable, BaseSegment):
@@ -217,7 +222,7 @@ def _render(
             return []
         grammar = getattr(matchable, "match_grammar", None)
         if grammar is None:
-            return [_terminal_for(vocab_hint or matchable.__name__)]
+            return [_terminal_for(vocab_hint or matchable.__name__, state.warned)]
         return _render(grammar, dialect, vocab_hint, depth, active_refs, state)
 
     if isinstance(matchable, Nothing):
@@ -245,12 +250,12 @@ def _render(
             if not templates:
                 # e.g. a MultiStringParser built from an empty dialect set
                 # (some dialects have no "bare functions", etc.)
-                return [_terminal_for(vocab_hint)]
+                return [_terminal_for(vocab_hint, state.warned)]
             template = sorted(templates)[0]
         return [template]
 
     # RegexParser, TypedParser, or anything else without literal text.
-    return [_terminal_for(vocab_hint)]
+    return [_terminal_for(vocab_hint, state.warned)]
 
 
 def _render_sequence(
@@ -280,7 +285,9 @@ def _render_sequence(
     return tokens
 
 
-def _branch_score(elem: object, dialect: Dialect, probe_depth: int = 3) -> int:
+def _branch_score(
+    elem: object, dialect: Dialect, warned: set[str], probe_depth: int = 3
+) -> int:
     """Cheap proxy for how 'simple' a branch is: token count of a shallow render.
 
     Grammars frequently list their most exotic form first (e.g. a BigQuery
@@ -295,9 +302,16 @@ def _branch_score(elem: object, dialect: Dialect, probe_depth: int = 3) -> int:
     to plain element-0 selection instead of calling back into this function.
     It also uses its own throwaway `known` registry, not the real discovery
     process's, so probing never registers or consumes candidate identities.
+    `warned` is still the real, shared one, though - a probe can bottom out
+    at the same vocab gaps as a real render, and those should count against
+    the same once-per-segment budget rather than a separate, discarded one.
     """
     probe_state = _WalkState(
-        dialect=dialect, max_depth=probe_depth, known={}, scoring_probe=True
+        dialect=dialect,
+        max_depth=probe_depth,
+        known={},
+        warned=warned,
+        scoring_probe=True,
     )
     try:
         return len(_render(elem, dialect, None, 0, frozenset(), probe_state))
@@ -317,7 +331,7 @@ def _render_branch(
     if state.scoring_probe:
         ranked = elements
     else:
-        ranked = sorted(elements, key=lambda e: _branch_score(e, dialect))
+        ranked = sorted(elements, key=lambda e: _branch_score(e, dialect, state.warned))
     chosen = ranked[0]  # The default: whichever alternate isn't targeted renders this.
     for alt in ranked[1:]:
         candidate = state._register("branch", alt)
@@ -332,6 +346,7 @@ def _run_walk(
     dialect: Dialect,
     max_depth: int,
     known: dict[tuple[str, int], _Candidate],
+    warned: set[str],
     target_indices: frozenset[int] = frozenset(),
     collecting: bool = False,
 ) -> tuple[list[str], _WalkState]:
@@ -339,6 +354,7 @@ def _run_walk(
         dialect=dialect,
         max_depth=max_depth,
         known=known,
+        warned=warned,
         target_indices=target_indices,
         collecting=collecting,
     )
@@ -365,8 +381,9 @@ def generate(
     entry = _entry_point(segment_name, dialect)
 
     known: dict[tuple[str, int], _Candidate] = {}
+    warned: set[str] = set()
     baseline_tokens, baseline_state = _run_walk(
-        entry, dialect, max_depth, known, collecting=True
+        entry, dialect, max_depth, known, warned, collecting=True
     )
     examples = [" ".join(baseline_tokens)]
 
@@ -388,7 +405,13 @@ def generate(
             discovery_walks += 1
             target = candidate.requires | {candidate.index}
             _, round_state = _run_walk(
-                entry, dialect, max_depth, known, target_indices=target, collecting=True
+                entry,
+                dialect,
+                max_depth,
+                known,
+                warned,
+                target_indices=target,
+                collecting=True,
             )
             next_frontier.extend(round_state.new_candidates)
         frontier = next_frontier
@@ -404,7 +427,7 @@ def generate(
             other = all_candidates[(i + width_offset) % len(all_candidates)]
             target |= set(other.requires) | {other.index}
         tokens, _ = _run_walk(
-            entry, dialect, max_depth, known, target_indices=frozenset(target)
+            entry, dialect, max_depth, known, warned, target_indices=frozenset(target)
         )
         text = " ".join(tokens)
         if text not in seen_texts:
