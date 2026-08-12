@@ -134,19 +134,53 @@ bugs before they'd reach a human or a future layer 4.
 
 ### Layer 4 — Real-engine ground truth
 
-`utils/realengine_check.py` checks layer 3's generated SQL against a real engine's
-own parser. Postgres is wired up via `pglast` (bundles `libpg_query`; no server,
-schema, or network needed), which is why it's the only engine covered so far.
+**Implemented** as `utils/realengine_check.py` (tests in
+`test/utils/realengine_check_test.py`), consuming layer 3's `generate()` +
+`self_check()` directly (same sys.path import trick as layer 3's own tests, no
+subprocess). Postgres is wired up via `pglast` (bundles `libpg_query`; confirmed
+installed and working in-session - no server, schema, or network needed), added to
+`requirements_dev.txt` under "util.py dependencies" - it's the only engine covered
+so far.
 
-- `pglast` bundles `libpg_query` for one fixed Postgres major version. A pass here
-  means "the PG version pglast bundles accepts this," not "every PG version
-  sqlfluff's postgres dialect targets accepts this." This is stated explicitly in
-  CONTRIBUTING and in the PR-facing check output itself, so a green check isn't
-  over-read as full-version-range coverage.
-- Dialects without a real-engine checker (everything except postgres, for now) say
-  so explicitly on the PR — part of layer 4's CI job, not a separate deferred item.
-- A `realengine-skip` convention lets a specific generated example be marked and
-  excluded with a reason, without silently dropping it from view.
+**What it does:** for each layer-3-generated example that passes sqlfluff's own
+`self_check`, calls `pglast.parse_sql(sql)`. Three outcomes: agreement (silent,
+the expected case), a known divergence (exact `(dialect, sql)` pair listed in
+`utils/realengine_skiplist.json` with a reason - printed as `[skipped]`, doesn't
+fail the run), or an unresolved divergence (printed as `[DIVERGENCE]` with the
+real parse error, fails the run with exit code 1). The skiplist starts empty - no
+divergences have been triaged yet, since the backfill audit (item 5 below) is a
+separate, later step.
+
+**Confirmed working end-to-end**: running against `postgres`/`SelectStatementSegment`
+and `postgres`/`InsertStatementSegment` immediately surfaced real divergences -
+e.g. `SELECT DISTINCT` with nothing after it (sqlfluff's grammar allows an empty
+select list; Postgres's real parser doesn't), and
+`INSERT INTO foo (foo) DEFAULT VALUES` (sqlfluff allows combining an explicit
+column list with `DEFAULT VALUES`; Postgres's real parser rejects the
+combination). Neither is in the skiplist - they're live, currently-unresolved
+findings, not something this task triaged away.
+
+- `pglast` bundles `libpg_query` for one fixed Postgres major version (`18.4` in
+  this environment, printed at the start of every run via
+  `pglast.get_postgresql_version()`). A pass here means "the PG version pglast
+  bundles accepts this," not "every PG version sqlfluff's postgres dialect targets
+  accepts this." Stated in the module docstring and the run banner; editing
+  CONTRIBUTING.md itself is left for when the CI job lands (deferred, see below).
+- A skiplist convention (`utils/realengine_skiplist.json`, matched by exact
+  `(dialect, sql)` string equality since generation is deterministic) lets a
+  specific known divergence be marked and excluded with a reason, without
+  silently dropping it from view - it still prints as `[skipped]`.
+
+**Deliberately deferred, not part of what shipped** (same "keep it simple"
+precedent as layer 3):
+- The GitHub Actions CI job itself.
+- Dialects without a real-engine checker (everything except postgres) explicitly
+  saying so on the PR - that's a CI/PR-comment mechanism, not something a
+  standalone CLI script does on its own.
+- The backfill audit of existing postgres fixtures against pglast (item 5) - a
+  separate follow-up now that the checker exists to run it with. The two live
+  divergences found above are a first, unaudited taste of what that backlog will
+  contain, not the backlog itself.
 
 ### Backlog handling
 
@@ -189,7 +223,7 @@ an environment with real engine access.
 | 1 | `dialect_grammar_diff.py`: dual-import live-object diff, inheritance-graph-aware (resolves effective grammar for all affected child dialects) + CONTRIBUTING/AGENTS docs | Not started |
 | 2 | `invalid/` fixture convention, test wiring, migrate `test__dialect__rejects_trailing_comma_after_final_cte`, seed fixtures, docs | Not started |
 | 3 | Layer 3 grammar-driven SQL generator: `utils/generate_dialect_sql.py` + `test/utils/generate_dialect_sql_test.py`. Built as one script rather than the original 3a-3d split — see note below. | **Done** |
-| 4 | `realengine_check.py` for postgres (pglast), documented PG-version caveat, `realengine-skip` convention, "no checker for this dialect" PR annotation, CI job | Not started |
+| 4 | `realengine_check.py` for postgres (pglast) + skiplist convention + tests | **Done** — CI job and "no checker for this dialect" PR annotation still not started |
 | 5 | Backfill audit of existing postgres fixtures + commit baseline/allowlist for the ~16 known divergences | Not started |
 | 6 | `--base` → `merge-base(base, HEAD)` in both tools, default auto-detects fork point; CI workflow fetches base ref explicitly (shallow-clone fix) | Not started |
 | 7 | Wire `realengine_check.py` to consume layer-3-generated SQL as primary source (fixtures remain for self-consistency tests) | Not started |
