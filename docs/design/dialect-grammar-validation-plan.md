@@ -116,8 +116,8 @@ doesn't default to whichever exotic form is listed first). Minimal-as-baseline
 was a fix made during implementation: an "everything present" baseline was tried
 first and almost never parsed cleanly (optional clauses combining in ways real
 grammars don't expect); minimal is far more robust to build single-change
-variants on top of. Bounded by `--max-depth` (cycle guard + recursion cap) and
-`--max-examples` (breadth cap). Every generated example is filtered through
+variants on top of. Bounded by a cycle guard (see below) and `--max-examples`
+(breadth cap). Every generated example is filtered through
 sqlfluff's own `Linter` (`self_check`) before being printed, catching generator
 bugs before they'd reach a human or a future layer 4.
 
@@ -272,6 +272,47 @@ Full 28-dialect x 3-segment (`SelectStatementSegment`,
 `CreateTableStatementSegment`, `DeleteStatementSegment`) crash sweep stayed
 clean; total runtime for all 84 combinations was under 40 seconds, well
 within the "slower is fine, minutes would not be" bound.
+
+**Numeric depth cap dropped; bounded solely by the cycle guard now.**
+Prompted by a question about why `Ref("DotSegment")` - a trivial
+`StringParser(".", ...)` - was falling back to the generic `"1"` terminal
+instead of resolving to `.`. Traced with instrumentation (same class of
+false alarm as the earlier `EqualsSegment` question, but this time run to a
+concrete root cause): it was **not** the main walk's `--max-depth` (confirmed
+by rerunning with it set to 100000 - the warning still fired). The actual
+cause was `_branch_score`'s scoring probe, which built its own throwaway
+`_WalkState` with a hardcoded `probe_depth=3` completely independent of
+`--max-depth`, but wrote into the same shared `warned` set as the real walk
+- so its own shallow truncations were reported as if they were real
+generator gaps. Every `DotSegment` hit had `state.max_depth == 3,
+scoring_probe == True`: 100% probe-driven, not a real-walk truncation.
+
+Rather than patch just the probe, the numeric depth cap was dropped
+entirely - from both the main walk and the probe - relying solely on the
+pre-existing cycle guard (`active_refs`: a `Ref` name already visited on the
+current path renders as a terminal instead of being followed again).
+Verified safe before shipping: unbounded-depth single walks across 9
+dialect/segment combos, including the worst self-referential case
+(`ExpressionSegment`), all completed in under 2ms with no `RecursionError`,
+even at Python's default recursion limit (1000) - a dialect has on the order
+of ~1200-1400 distinct `Ref` names, an absolute upper bound on how deep any
+single path can go before a name repeats and the guard fires. The more
+expensive case - `_branch_score` itself unbounded, since it runs once per
+sibling at *every* branch point, not once per walk - was also measured:
+full `generate()` across all 28 dialects x 3 segments completed in ~1.8s
+total, worst single case ~97ms. Confirmed it resolves the reported symptom:
+the `DotSegment` warning disappears entirely, and `mariadb`/
+`DeleteStatementSegment`'s total distinct vocab warnings drop from 32 to 5 -
+the remainder being genuine cycle-guard terminations (e.g.
+`WithCompoundStatementSegment` recursing into itself for nested CTEs), not
+artifacts. Since `depth` was only ever read for the removed comparison, it
+was dropped as a parameter from every function that threaded it through
+(`_render`, `_render_sequence`, `_render_repeated`, `_render_branch`,
+`_run_walk`), not left as dead plumbing. `--max-depth` is gone from both
+CLIs (`generate_dialect_sql.py`, `realengine_check.py`) and from `generate()`'s
+signature - a clean removal rather than a deprecated-but-ignored parameter,
+consistent with this being internal dev tooling with no external callers to
+stay compatible with.
 
 **Deliberately deferred, not part of what shipped:**
 - Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").

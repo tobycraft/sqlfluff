@@ -45,9 +45,19 @@ not literally exhaustive - the true combinatorial space is exponential, and
 
 Terminal matchers that don't carry their own literal text (identifiers, numeric
 and quoted literals, ...) are filled from a small fixed vocabulary keyed by the
-``Ref`` name that led to them. Recursion is bounded by both a depth limit and a
-cycle guard, since dialect grammars are frequently self-referential (e.g.
-expressions containing expressions).
+``Ref`` name that led to them. Recursion is bounded solely by a cycle guard
+(a ``Ref`` name already visited on the current path renders as a terminal
+instead of being followed again), since dialect grammars are frequently
+self-referential (e.g. expressions containing expressions). A dialect has on
+the order of a thousand distinct ``Ref`` names, an absolute upper bound on
+how deep any single path can recurse before the guard fires, so no separate
+numeric depth cap is needed - confirmed empirically to stay fast (a full
+28-dialect sweep completes in ~2s) even without one. An earlier numeric depth
+cap was removed after it caused a subtle bug: a completely resolvable
+``Ref`` (e.g. a one-character ``.`` literal reached deep inside a
+self-referential expression chain) would render as a generic fallback value
+purely because it was encountered past the cap, not because it was actually
+unresolvable.
 
 This only produces SQL text - it does not check that text against anything.
 That is a separate, later step.
@@ -170,7 +180,6 @@ class _WalkState:
     """
 
     dialect: Dialect
-    max_depth: int
     known: dict[tuple, _Candidate]
     # Vocab-gap names already warned about - shared across every walk in one
     # `generate()` call (like `known`), so each gap prints once per segment
@@ -248,14 +257,13 @@ def _render(
     matchable: object,
     dialect: Dialect,
     vocab_hint: Optional[str],
-    depth: int,
     active_refs: frozenset[str],
     state: _WalkState,
 ) -> list[str]:
     """Render `matchable` (and everything beneath it) to a list of tokens."""
     if isinstance(matchable, Ref):
         name = matchable._ref
-        if name in active_refs or depth >= state.max_depth:
+        if name in active_refs:
             return [_terminal_for(name, state)]
         try:
             target = dialect.ref(name)
@@ -264,7 +272,7 @@ def _render(
             # dialects (e.g. a shared grammar referencing a keyword that
             # one dialect doesn't define) - treat as unresolvable.
             return [_terminal_for(name, state)]
-        return _render(target, dialect, name, depth + 1, active_refs | {name}, state)
+        return _render(target, dialect, name, active_refs | {name}, state)
 
     if isinstance(matchable, type) and issubclass(matchable, BaseSegment):
         if issubclass(matchable, MetaSegment):
@@ -274,7 +282,7 @@ def _render(
         grammar = getattr(matchable, "match_grammar", None)
         if grammar is None:
             return [_terminal_for(vocab_hint or matchable.__name__, state)]
-        return _render(grammar, dialect, vocab_hint, depth, active_refs, state)
+        return _render(grammar, dialect, vocab_hint, active_refs, state)
 
     if isinstance(matchable, Nothing):
         # A placeholder that never matches (dialect-extension point) -
@@ -292,16 +300,14 @@ def _render(
 
     if isinstance(matchable, Bracketed):
         open_c, close_c = BRACKET_CHARS.get(matchable.bracket_type, ("(", ")"))
-        inner = _render_sequence(
-            matchable._elements, dialect, depth, active_refs, state
-        )
+        inner = _render_sequence(matchable._elements, dialect, active_refs, state)
         return [open_c, *inner, close_c]
 
     if isinstance(matchable, Sequence):
-        return _render_sequence(matchable._elements, dialect, depth, active_refs, state)
+        return _render_sequence(matchable._elements, dialect, active_refs, state)
 
     if isinstance(matchable, AnyNumberOf):
-        return _render_branch(matchable, dialect, depth, active_refs, state)
+        return _render_branch(matchable, dialect, active_refs, state)
 
     if isinstance(matchable, (StringParser, MultiStringParser)):
         template = getattr(matchable, "template", None)
@@ -330,7 +336,6 @@ def _render(
 def _render_sequence(
     elements: list,
     dialect: Dialect,
-    depth: int,
     active_refs: frozenset[str],
     state: _WalkState,
 ) -> list[str]:
@@ -350,7 +355,7 @@ def _render_sequence(
             candidate = state._register("add", elem)
             if candidate is None or candidate.index not in state.target_indices:
                 continue  # Omitted by default; only a targeted variant adds it.
-        tokens.extend(_render(elem, dialect, None, depth, active_refs, state))
+        tokens.extend(_render(elem, dialect, None, active_refs, state))
     return tokens
 
 
@@ -376,16 +381,19 @@ def _prefers_reference(elem: object) -> bool:
     return any(elem._ref.endswith(suffix) for suffix, _ in SUFFIX_VOCAB)
 
 
-def _branch_score(
-    elem: object, dialect: Dialect, warned: set[str], probe_depth: int = 3
-) -> int:
+def _branch_score(elem: object, dialect: Dialect, warned: set[str]) -> int:
     """Cheap proxy for how 'simple' a branch is: token count of a shallow render.
 
     Grammars frequently list their most exotic form first (e.g. a BigQuery
     ML.PREDICT table function ahead of a plain table reference), so always
-    picking element 0 tends to produce the least representative example.
-    A short, depth-capped probe render is a cheap enough stand-in for "which
-    branch is the plain/common one" without fully expanding every option.
+    picking element 0 tends to produce the least representative example. A
+    probe render is a cheap enough stand-in for "which branch is the plain/
+    common one" without fully expanding every option - "cheap" here comes
+    from the cycle guard alone (no separate depth cap): confirmed across a
+    full 28-dialect x 3-segment sweep that unbounded-by-depth probing still
+    completes in ~2s total, ~100ms worst case, since a probe can only
+    recurse through the dialect's few thousand distinct `Ref` names once
+    each before the cycle guard stops it.
 
     The probe itself must not re-rank branches it encounters (that would
     cascade into scoring every branch beneath every branch), so it runs with
@@ -401,13 +409,12 @@ def _branch_score(
     """
     probe_state = _WalkState(
         dialect=dialect,
-        max_depth=probe_depth,
         known={},
         warned=warned,
         scoring_probe=True,
     )
     try:
-        return len(_render(elem, dialect, None, 0, frozenset(), probe_state))
+        return len(_render(elem, dialect, None, frozenset(), probe_state))
     except RecursionError:  # pragma: no cover - defensive only
         return 10**6
 
@@ -446,7 +453,6 @@ def _render_repeated(
     delimiter: object,
     count: int,
     dialect: Dialect,
-    depth: int,
     active_refs: frozenset[str],
     state: _WalkState,
 ) -> list[str]:
@@ -462,19 +468,18 @@ def _render_repeated(
     tests (does the delimiter/trailing-comma/multi-item structure parse) -
     varying content per repetition is a distinct, separable enhancement.
     """
-    delim_tokens = _render(delimiter, dialect, None, depth, active_refs, state)
+    delim_tokens = _render(delimiter, dialect, None, active_refs, state)
     tokens: list[str] = []
     for i in range(count):
         if i > 0:
             tokens.extend(delim_tokens)
-        tokens.extend(_render(chosen, dialect, None, depth, active_refs, state))
+        tokens.extend(_render(chosen, dialect, None, active_refs, state))
     return tokens
 
 
 def _render_branch(
     matchable: AnyNumberOf,
     dialect: Dialect,
-    depth: int,
     active_refs: frozenset[str],
     state: _WalkState,
 ) -> list[str]:
@@ -508,7 +513,7 @@ def _render_branch(
             )
             if candidate is not None and candidate.index in state.target_indices:
                 return _render_repeated(
-                    chosen, delimiter, count, dialect, depth, active_refs, state
+                    chosen, delimiter, count, dialect, active_refs, state
                 )
         if matchable.allow_trailing:
             candidate = state._register(
@@ -516,20 +521,17 @@ def _render_branch(
             )
             if candidate is not None and candidate.index in state.target_indices:
                 tokens = _render_repeated(
-                    chosen, delimiter, 2, dialect, depth, active_refs, state
+                    chosen, delimiter, 2, dialect, active_refs, state
                 )
-                tokens.extend(
-                    _render(delimiter, dialect, None, depth, active_refs, state)
-                )
+                tokens.extend(_render(delimiter, dialect, None, active_refs, state))
                 return tokens
 
-    return _render(chosen, dialect, None, depth, active_refs, state)
+    return _render(chosen, dialect, None, active_refs, state)
 
 
 def _run_walk(
     entry: object,
     dialect: Dialect,
-    max_depth: int,
     known: dict[tuple, _Candidate],
     warned: set[str],
     target_indices: frozenset[int] = frozenset(),
@@ -537,20 +539,18 @@ def _run_walk(
 ) -> tuple[list[str], _WalkState]:
     state = _WalkState(
         dialect=dialect,
-        max_depth=max_depth,
         known=known,
         warned=warned,
         target_indices=target_indices,
         collecting=collecting,
     )
-    tokens = _render(entry, dialect, None, 0, frozenset(), state)
+    tokens = _render(entry, dialect, None, frozenset(), state)
     return tokens, state
 
 
 def generate(
     dialect_name: str,
     segment_name: str,
-    max_depth: int = 8,
     max_examples: int = 50,
     coverage: int = 0,
 ) -> list[str]:
@@ -567,7 +567,7 @@ def generate(
     known: dict[tuple, _Candidate] = {}
     warned: set[str] = set()
     baseline_tokens, baseline_state = _run_walk(
-        entry, dialect, max_depth, known, warned, collecting=True
+        entry, dialect, known, warned, collecting=True
     )
     examples = [" ".join(baseline_tokens)]
 
@@ -591,7 +591,6 @@ def generate(
             _, round_state = _run_walk(
                 entry,
                 dialect,
-                max_depth,
                 known,
                 warned,
                 target_indices=target,
@@ -611,7 +610,7 @@ def generate(
             other = all_candidates[(i + width_offset) % len(all_candidates)]
             target |= set(other.requires) | {other.index}
         tokens, _ = _run_walk(
-            entry, dialect, max_depth, known, warned, target_indices=frozenset(target)
+            entry, dialect, known, warned, target_indices=frozenset(target)
         )
         text = " ".join(tokens)
         if text not in seen_texts:
@@ -659,7 +658,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dialect", required=True)
     parser.add_argument("--segment", required=True)
-    parser.add_argument("--max-depth", type=int, default=8)
     parser.add_argument("--max-examples", type=int, default=50)
     parser.add_argument(
         "--coverage",
@@ -682,7 +680,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         examples = generate(
             args.dialect,
             args.segment,
-            args.max_depth,
             args.max_examples,
             args.coverage,
         )

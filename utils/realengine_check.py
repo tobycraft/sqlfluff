@@ -224,14 +224,13 @@ def load_skiplist(path: Optional[Path]) -> dict[tuple[str, str], str]:
 def run(
     dialect: str,
     segment: str,
-    max_depth: int,
     max_examples: int,
     skiplist: dict[tuple[str, str], str],
     coverage: int = 0,
 ) -> bool:
     """Run the check. Returns True if there are no unresolved divergences."""
     checker = CHECKERS[dialect]
-    examples = gds.generate(dialect, segment, max_depth, max_examples, coverage)
+    examples = gds.generate(dialect, segment, max_examples, coverage)
     ok = True
     for sql in examples:
         if not gds.self_check(dialect, sql):
@@ -257,7 +256,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dialect", required=True, choices=sorted(CHECKERS))
     parser.add_argument("--segment", required=True)
-    parser.add_argument("--max-depth", type=int, default=8)
     parser.add_argument("--max-examples", type=int, default=50)
     parser.add_argument(
         "--coverage",
@@ -304,7 +302,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         ok = run(
             args.dialect,
             args.segment,
-            args.max_depth,
             args.max_examples,
             skiplist,
             args.coverage,

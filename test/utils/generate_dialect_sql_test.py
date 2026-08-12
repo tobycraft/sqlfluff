@@ -37,7 +37,7 @@ def test__generate_dialect_sql__produces_valid_examples(dialect, segment):
     useful if *some* of what it generates for a real statement type survives
     that filtering.
     """
-    examples = generate(dialect, segment, max_depth=8, max_examples=20)
+    examples = generate(dialect, segment, max_examples=20)
     assert examples, "generator produced no candidates at all"
 
     valid = [sql for sql in examples if self_check(dialect, sql)]
@@ -47,16 +47,18 @@ def test__generate_dialect_sql__produces_valid_examples(dialect, segment):
 def test__generate_dialect_sql__unknown_segment_raises():
     """An unknown --segment name should fail clearly, not silently."""
     with pytest.raises(GenerationError):
-        generate("ansi", "NotARealSegmentName", max_depth=8, max_examples=5)
+        generate("ansi", "NotARealSegmentName", max_examples=5)
 
 
 def test__generate_dialect_sql__self_referential_grammar_terminates():
     """Self-referential grammar must not hang or blow the recursion stack.
 
-    Expressions containing expressions are exactly this case - the depth
-    limit and cycle guard should always bring the walk to an end.
+    Expressions containing expressions are exactly this case - the cycle
+    guard (a Ref name already visited on the current path renders as a
+    terminal instead of being followed again) should always bring the walk
+    to an end.
     """
-    examples = generate("ansi", "ExpressionSegment", max_depth=6, max_examples=10)
+    examples = generate("ansi", "ExpressionSegment", max_examples=10)
     assert examples
 
 
@@ -65,9 +67,9 @@ def test__generate_dialect_sql__zero_coverage_matches_default():
 
     This is the backward-compatibility contract for the coverage parameter.
     """
-    with_default = generate("postgres", "CreateTableStatementSegment", 8, 20)
+    with_default = generate("postgres", "CreateTableStatementSegment", 20)
     with_explicit_zero = generate(
-        "postgres", "CreateTableStatementSegment", 8, 20, coverage=0
+        "postgres", "CreateTableStatementSegment", 20, coverage=0
     )
     assert with_default == with_explicit_zero
 
@@ -84,12 +86,10 @@ def test__generate_dialect_sql__high_coverage_reaches_nested_content():
     branch points and look for *new* candidates nested inside them, which
     should surface something with real content in the column list.
     """
-    baseline_only = generate(
-        "postgres", "CreateTableStatementSegment", 8, 40, coverage=0
-    )
+    baseline_only = generate("postgres", "CreateTableStatementSegment", 40, coverage=0)
     assert baseline_only[0] == "CREATE TABLE foo ( )"
 
-    thorough = generate("postgres", "CreateTableStatementSegment", 8, 40, coverage=100)
+    thorough = generate("postgres", "CreateTableStatementSegment", 40, coverage=100)
     assert any(
         len(example.split()) > len(baseline_only[0].split()) for example in thorough
     )
@@ -103,7 +103,7 @@ def test__generate_dialect_sql__mid_coverage_combines_candidates():
     at least one example where two independent optional SELECT clauses are
     both present simultaneously.
     """
-    examples = generate("ansi", "SelectStatementSegment", 8, 40, coverage=60)
+    examples = generate("ansi", "SelectStatementSegment", 40, coverage=60)
     clause_keywords = ("WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET")
 
     def clause_count(example: str) -> int:
@@ -116,9 +116,9 @@ def test__generate_dialect_sql__mid_coverage_combines_candidates():
 def test__generate_dialect_sql__coverage_out_of_range_raises():
     """An out-of-range coverage value should fail clearly, not silently."""
     with pytest.raises(ValueError):
-        generate("ansi", "SelectStatementSegment", 8, 10, coverage=-1)
+        generate("ansi", "SelectStatementSegment", 10, coverage=-1)
     with pytest.raises(ValueError):
-        generate("ansi", "SelectStatementSegment", 8, 10, coverage=101)
+        generate("ansi", "SelectStatementSegment", 10, coverage=101)
 
 
 def test__main__coverage_out_of_range_rejected_by_cli():
@@ -175,7 +175,7 @@ def test__generate_dialect_sql__delimited_produces_multi_item_example():
     a Delimited(..., allow_trailing=True), so this also exercises the
     trailing-comma variant.
     """
-    examples = generate("ansi", "SelectStatementSegment", max_depth=8, max_examples=40)
+    examples = generate("ansi", "SelectStatementSegment", max_examples=40)
     assert any(", *" in example for example in examples), "no multi-item example"
     assert any(example.rstrip().endswith(",") for example in examples), (
         "no trailing-comma example"
@@ -188,9 +188,7 @@ def test__generate_dialect_sql__multi_string_parser_reaches_alternates():
     Regression test: previously always rendered sorted(templates)[0] and
     never any other member of the closed keyword set.
     """
-    examples = generate(
-        "snowflake", "DatetimeUnitSegment", max_depth=8, max_examples=40
-    )
+    examples = generate("snowflake", "DatetimeUnitSegment", max_examples=40)
     assert len({example.strip() for example in examples}) > 1
 
 
@@ -201,9 +199,7 @@ def test__generate_dialect_sql__terminal_vocab_reaches_alternates():
     name to a single fixed value, so e.g. every generated identifier was
     always literally "foo".
     """
-    examples = generate(
-        "ansi", "CreateTableStatementSegment", max_depth=8, max_examples=40
-    )
+    examples = generate("ansi", "CreateTableStatementSegment", max_examples=40)
     assert any("bar_1" in example for example in examples)
 
 
@@ -222,6 +218,6 @@ def test__generate_dialect_sql__delete_statement_produces_valid_examples(dialect
     "FROM DUAL"). Confirmed both fixed: this used to generate 0 valid examples
     for all four of these dialects.
     """
-    examples = generate(dialect, "DeleteStatementSegment", max_depth=8, max_examples=20)
+    examples = generate(dialect, "DeleteStatementSegment", max_examples=20)
     valid = [sql for sql in examples if self_check(dialect, sql)]
     assert valid, f"no valid DELETE example generated for {dialect}"

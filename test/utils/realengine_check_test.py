@@ -113,7 +113,7 @@ def test__run__skiplisted_divergence_is_skipped_not_failed(monkeypatch, capsys):
     monkeypatch.setattr("generate_dialect_sql.self_check", lambda *a, **k: True)
 
     skiplist = {("postgres", "SELECT * FROM foo"): "known false positive"}
-    ok = rec.run("postgres", "SelectStatementSegment", 8, 10, skiplist)
+    ok = rec.run("postgres", "SelectStatementSegment", 10, skiplist)
 
     assert ok is True
     out = capsys.readouterr().out
@@ -129,7 +129,7 @@ def test__run__unresolved_divergence_fails_the_run(monkeypatch, capsys):
     )
     monkeypatch.setattr("generate_dialect_sql.self_check", lambda *a, **k: True)
 
-    ok = rec.run("postgres", "SelectStatementSegment", 8, 10, skiplist={})
+    ok = rec.run("postgres", "SelectStatementSegment", 10, skiplist={})
 
     assert ok is False
     out = capsys.readouterr().out
@@ -144,13 +144,13 @@ def test__run__end_to_end_smoke():
     a smoke test that the whole pipeline (generate -> self_check -> pglast)
     runs without raising.
     """
-    ok = rec.run("postgres", "CreateTableStatementSegment", 8, 20, skiplist={})
+    ok = rec.run("postgres", "CreateTableStatementSegment", 20, skiplist={})
     assert isinstance(ok, bool)
 
 
 def test__run__end_to_end_smoke_duckdb():
     """Same smoke test as above, against the DuckDB checker."""
-    ok = rec.run("duckdb", "CreateTableStatementSegment", 8, 20, skiplist={})
+    ok = rec.run("duckdb", "CreateTableStatementSegment", 20, skiplist={})
     assert isinstance(ok, bool)
 
 
@@ -162,21 +162,19 @@ def test__run__end_to_end_smoke_sparksql():
     session-startup cost only if no earlier test in this process already
     triggered it - it isn't repeated per test.
     """
-    ok = rec.run("sparksql", "CreateTableStatementSegment", 8, 20, skiplist={})
+    ok = rec.run("sparksql", "CreateTableStatementSegment", 20, skiplist={})
     assert isinstance(ok, bool)
 
 
 def test__run__end_to_end_smoke_clickhouse():
     """Same smoke test as above, against the ClickHouse checker."""
-    ok = rec.run("clickhouse", "CreateTableStatementSegment", 8, 20, skiplist={})
+    ok = rec.run("clickhouse", "CreateTableStatementSegment", 20, skiplist={})
     assert isinstance(ok, bool)
 
 
 def test__run__coverage_forwards_to_generate():
     """Coverage should pass through run() to generate_dialect_sql.generate."""
-    ok = rec.run(
-        "duckdb", "CreateTableStatementSegment", 8, 20, skiplist={}, coverage=60
-    )
+    ok = rec.run("duckdb", "CreateTableStatementSegment", 20, skiplist={}, coverage=60)
     assert isinstance(ok, bool)
 
 
