@@ -165,6 +165,48 @@ def test__main__vocab_warnings_print_once_per_segment(capsys):
     assert len(warning_lines) == len(set(warning_lines))
 
 
+def test__generate_dialect_sql__delimited_produces_multi_item_example():
+    """A Delimited list should be exercised with more than one item.
+
+    Regression test for the repetition-count gap: previously every Delimited
+    node (comma-separated column lists, SELECT target lists, ...) always
+    rendered exactly one item, so multi-item lists were structurally
+    unreachable output. ansi's SelectClauseSegment wraps its column list in
+    a Delimited(..., allow_trailing=True), so this also exercises the
+    trailing-comma variant.
+    """
+    examples = generate("ansi", "SelectStatementSegment", max_depth=8, max_examples=40)
+    assert any(", *" in example for example in examples), "no multi-item example"
+    assert any(example.rstrip().endswith(",") for example in examples), (
+        "no trailing-comma example"
+    )
+
+
+def test__generate_dialect_sql__multi_string_parser_reaches_alternates():
+    """A MultiStringParser site should produce more than one distinct keyword.
+
+    Regression test: previously always rendered sorted(templates)[0] and
+    never any other member of the closed keyword set.
+    """
+    examples = generate(
+        "snowflake", "DatetimeUnitSegment", max_depth=8, max_examples=40
+    )
+    assert len({example.strip() for example in examples}) > 1
+
+
+def test__generate_dialect_sql__terminal_vocab_reaches_alternates():
+    """A terminal vocab category should produce more than one distinct value.
+
+    Regression test: TERMINAL_VOCAB/SUFFIX_VOCAB previously mapped every
+    name to a single fixed value, so e.g. every generated identifier was
+    always literally "foo".
+    """
+    examples = generate(
+        "ansi", "CreateTableStatementSegment", max_depth=8, max_examples=40
+    )
+    assert any("bar_1" in example for example in examples)
+
+
 @pytest.mark.parametrize("dialect", ["ansi", "mysql", "mariadb", "sqlite"])
 def test__generate_dialect_sql__delete_statement_produces_valid_examples(dialect):
     """Regression test: these produced zero valid examples at all.

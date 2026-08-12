@@ -202,6 +202,77 @@ dialects (`ansi`, `mysql`, `mariadb`, `sqlite`) had a **zero-valid-example**
 now produce valid output; other segments saw smaller improvements. Full
 28-dialect x 3-segment crash sweep stayed clean throughout.
 
+**Three previously-unenumerated dimensions, fixed.** An audit of "what still
+isn't fully enumerated" (beyond optional elements and `OneOf`/`AnySetOf`
+branches, both already covered) turned up three decision points that always
+rendered exactly one fixed representative and never varied it:
+`MultiStringParser` keyword alternatives (e.g. `snowflake`'s `DatetimeUnitSegment`
+has 93 templates; `sorted(templates)[0]` was always chosen, the other 92 never
+tried), repetition count on `Delimited` (always exactly one item — multi-item
+lists and trailing-comma behavior, the literal shape of the trailing-comma
+regression that originally motivated this whole project, were structurally
+unreachable output), and terminal vocabulary (`TERMINAL_VOCAB`/`SUFFIX_VOCAB`
+each mapped to one fixed string — every generated identifier was always
+literally `"foo"`). Accepted trade-off, explicitly signed off on: richer
+`--coverage 0` output, a slower default run, in exchange for reaching this
+content at all — `--max-examples`'s default is unchanged by this pass; raising
+it is a separate, later step.
+
+All three register their alternates as ordinary candidates in the same
+`_WalkState.known` registry optional-elements and branches already use
+(`_WalkState._register` was generalized to accept an explicit dedup key,
+since the default `(kind, id(payload))` only works when `payload` is a
+grammar object with stable identity — a plain string/int payload, like a
+template or vocab value, needs an explicit key built from stable parts, since
+string `id()` isn't reliable identity). That means they're discovered and
+combined by the exact same discovery-round/combination-width machinery
+`--coverage` already drives — no separate mechanism needed.
+
+**Correction found during implementation, not in the original plan for this
+work:** the plan going in assumed `Delimited`'s `max_times` (or, absent that,
+bare `AnyNumberOf`/`AnySetOf`'s `max_times is None or > 1`) was a reliable
+"can this repeat" signal, and that repeating "the same chosen element N times"
+was safe for all three grammar types. Both assumptions were wrong, found by
+testing rather than caught upfront:
+- `OneOf` (which `Delimited` subclasses) hardcodes `max_times=1, min_times=1`
+  unconditionally in its own `__init__`, for every instance regardless of how
+  many items it can actually match — `max_times` there is leftover "pick
+  exactly one branch template" bookkeeping, unrelated to item count. Not a
+  usable repeatability signal for `Delimited` at all.
+- Applying the same "re-render the same chosen element N times" logic to bare
+  `AnyNumberOf`/`AnySetOf` (which the plan called for, since their `max_times`
+  *is* genuinely configurable) produced nonsense: `CREATE TABLE foo ( )
+  WITHOUT OIDS , WITHOUT OIDS` and `... PARTITION BY RANGE ( ) , PARTITION BY
+  RANGE ( )`. Root cause: those containers are frequently a bare `AnyNumberOf`
+  wrapping several *different*, heterogeneous sibling clause options (postgres'
+  table-options tail wraps `PARTITION BY`/`USING`/`WITH(OUT) OIDS`/`ON COMMIT`/
+  `TABLESPACE` this way), not a homogeneous repeatable list — repeating a
+  single chosen branch doesn't model "pick several different options," it
+  just duplicates one clause.
+
+Fixed by restricting repetition to `isinstance(matchable, Delimited)` only,
+dropping the bare-`AnyNumberOf`/`AnySetOf` case from this pass entirely
+(comma-delimited lists are reliably homogeneous — the failure mode above
+doesn't apply to them). Confirmed via direct grammar introspection after the
+fix: `ansi`/`SelectStatementSegment` at `--coverage 0` now includes
+`SELECT * , *`, `SELECT * , * , *`, and a trailing-comma `SELECT * , * ,`
+example (its `SelectClauseSegment` Delimited has `allow_trailing=True`);
+`ansi`/`CreateTableStatementSegment`'s column-list `Delimited`, once its
+enclosing optional branch is active, produces `CREATE TABLE foo ( foo , foo
+)`; the nonsense duplicate-clause cases are gone. **Known, disclosed
+simplification kept from the original plan:** each repetition re-renders the
+same chosen element, so a 2-column table's columns share one name/type
+(`foo, foo`) rather than varying per repetition — syntactically sufficient for
+what this exercises (does the delimiter/trailing-comma/multi-item structure
+parse), and any real-engine "duplicate column" complaint a real engine raises
+is a semantic error, not a syntax one, so it's already correctly ignored by
+every layer 4 checker.
+
+Full 28-dialect x 3-segment (`SelectStatementSegment`,
+`CreateTableStatementSegment`, `DeleteStatementSegment`) crash sweep stayed
+clean; total runtime for all 84 combinations was under 40 seconds, well
+within the "slower is fine, minutes would not be" bound.
+
 **Deliberately deferred, not part of what shipped:**
 - Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").
 - Base-vs-head generation to filter pre-existing issues surfaced via shared/

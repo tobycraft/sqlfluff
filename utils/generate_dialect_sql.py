@@ -11,6 +11,20 @@ because it's far more likely to be valid SQL - fewer chances to combine two
 optional clauses that don't make sense together or land in a rarely-used
 optional branch.
 
+Three further dimensions get the same "one candidate per option" treatment:
+``MultiStringParser`` keyword alternatives (e.g. a bare-function set like
+``CURRENT_DATE``/``CURRENT_TIME``/...), repetition count on ``Delimited``
+(rendering 2 or 3 items instead of always exactly one, plus a trailing-
+delimiter variant where the grammar allows one - bare ``AnyNumberOf``/
+``AnySetOf`` are deliberately excluded, since their options are usually
+heterogeneous siblings rather than a repeatable homogeneous list, and
+re-rendering the same chosen element N times there produces nonsense like
+repeating a whole unrelated clause), and alternate values for terminal
+vocabulary categories (a second/third representative identifier, number,
+etc.). All of these register as ordinary candidates in the same registry
+optional-elements and branches already use, so they're discovered and
+combined by the same machinery described below.
+
 By default only the optional elements and branches reachable *while rendering
 the minimal baseline* are ever discovered - anything nested inside an optional
 that's omitted by default, or a branch that isn't chosen, is invisible. The
@@ -52,18 +66,23 @@ from sqlfluff.core.dialects.base import Dialect
 from sqlfluff.core.parser.grammar.anyof import AnyNumberOf
 from sqlfluff.core.parser.grammar.base import Nothing, Ref
 from sqlfluff.core.parser.grammar.conditional import Conditional
+from sqlfluff.core.parser.grammar.delimited import Delimited
 from sqlfluff.core.parser.grammar.sequence import Bracketed, Sequence
 from sqlfluff.core.parser.parsers import MultiStringParser, StringParser
 from sqlfluff.core.parser.segments import BaseSegment, MetaSegment
 
 # Terminal matchers that don't carry their own literal text, keyed by the
-# `Ref` name that led to them. Names reached through a `Ref` that don't fit
-# the suffix patterns below.
-TERMINAL_VOCAB = {
-    "ParameterNameSegment": "foo",
-    "NumericLiteralSegment": "1",
-    "QuotedLiteralSegment": "'a'",
-    "BooleanLiteralGrammar": "true",
+# `Ref` name that led to them. Each entry is a list of representative values,
+# not just one - the first is the default (baseline) value, identical to
+# every earlier version of this tool; the rest are registered as ordinary
+# "value" candidates the same way branch alternates are, so e.g. a second
+# NumericLiteralSegment value can get its own generated example. Names
+# reached through a `Ref` that don't fit the suffix patterns below.
+TERMINAL_VOCAB: dict[str, list[str]] = {
+    "ParameterNameSegment": ["foo", "bar"],
+    "NumericLiteralSegment": ["1", "-1", "1.5"],
+    "QuotedLiteralSegment": ["'a'", "''"],
+    "BooleanLiteralGrammar": ["true", "false"],
 }
 
 # Every dialect defines its own family of identifier/reference grammar names
@@ -72,17 +91,19 @@ TERMINAL_VOCAB = {
 # variants by exact name, match by suffix. More specific suffixes are listed
 # first since matching stops at the first hit (e.g. "QuotedIdentifierSegment"
 # would otherwise also match the plain "IdentifierSegment" entry below it).
-SUFFIX_VOCAB = [
-    ("QuotedIdentifierSegment", '"foo"'),
-    ("IdentifierSegment", "foo"),
-    ("IdentifierGrammar", "foo"),
-    ("ReferenceSegment", "foo"),
-    ("ReferenceGrammar", "foo"),
+# Same list-of-values shape as TERMINAL_VOCAB, same reasoning.
+SUFFIX_VOCAB: list[tuple[str, list[str]]] = [
+    ("QuotedIdentifierSegment", ['"foo"', '"bar baz"']),
+    ("IdentifierSegment", ["foo", "bar_1"]),
+    ("IdentifierGrammar", ["foo", "bar_1"]),
+    ("ReferenceSegment", ["foo", "bar_1"]),
+    ("ReferenceGrammar", ["foo", "bar_1"]),
 ]
 
 # Anything matching neither TERMINAL_VOCAB nor SUFFIX_VOCAB falls back to
 # this and prints a note to stderr, so gaps stay visible instead of silently
-# producing bad SQL.
+# producing bad SQL. Deliberately a single value, not a list - there's
+# nothing principled to enumerate for a genuinely unknown gap.
 DEFAULT_FALLBACK = "1"
 
 BRACKET_CHARS = {
@@ -103,35 +124,23 @@ MAX_DISCOVERY_DEPTH = 5  # generous - reaching a real column definition inside
 MAX_COMBINATION_WIDTH = 4  # enough for e.g. WHERE + GROUP BY + ORDER BY +
 # LIMIT together, without approaching factorial blowup.
 
+# How many repeated items to try for a Delimited node (see _can_repeat for
+# why this doesn't extend to bare AnyNumberOf/AnySetOf). Fixed and small -
+# not derived from the grammar's own bounds, and not attempting to fully
+# replicate sqlfluff's real matching rules. 2 proves "does a second item and
+# its delimiter parse," 3 adds a little more confidence without meaningfully
+# increasing cost.
+REPEAT_COUNTS = (2, 3)
+
+# Registered unconditionally (not gated behind --coverage), same as "add"
+# and "branch" candidates always have been - so, as of this change,
+# --coverage 0's default output is richer than earlier versions of this
+# tool produced. Disclosed and deliberate: these are exactly as fundamental
+# a source of grammar variation as optional elements and branches are.
+
 
 class GenerationError(Exception):
     """Raised when the requested entry point can't be resolved."""
-
-
-def _terminal_for(name: Optional[str], warned: set[str]) -> str:
-    if name and name in TERMINAL_VOCAB:
-        return TERMINAL_VOCAB[name]
-    if name:
-        for suffix, value in SUFFIX_VOCAB:
-            if name.endswith(suffix):
-                return value
-    if name and name not in warned:
-        warned.add(name)
-        print(
-            f"[generate_dialect_sql] no vocab entry for {name!r}, "
-            f"using fallback {DEFAULT_FALLBACK!r}",
-            file=sys.stderr,
-        )
-    return DEFAULT_FALLBACK
-
-
-def _coverage_to_params(coverage: int) -> tuple[int, int]:
-    """Map a 0-100 coverage value onto (discovery_depth, combination_width)."""
-    if not 0 <= coverage <= 100:
-        raise ValueError(f"coverage must be between 0 and 100, got {coverage}")
-    discovery_depth = round(coverage / 100 * MAX_DISCOVERY_DEPTH)
-    combination_width = max(1, round(coverage / 100 * MAX_COMBINATION_WIDTH))
-    return discovery_depth, combination_width
 
 
 @dataclass
@@ -139,8 +148,8 @@ class _Candidate:
     """One point in the grammar tree where a variant could be generated."""
 
     index: int
-    kind: str  # "add" (an omitted optional) or "branch" (an alternate option)
-    payload: object  # the element to render
+    kind: str  # "add", "branch", "template", "value", "repeat", or "trailing"
+    payload: object  # informational only - never read back, see call sites
     # Other candidates' global ids that must also be active to reach this one
     # (its ancestors in the optional/branch nesting).
     requires: frozenset[int] = frozenset()
@@ -151,16 +160,18 @@ class _WalkState:
     """Threaded through one recursive walk of the grammar tree.
 
     `known` is a registry shared across *every* walk in one `generate()` call
-    (not reset per walk), keyed by `(kind, id(payload))`. Grammar objects are
-    constructed once when a dialect module loads and reused for the process's
-    lifetime, so `id(payload)` is a stable identity for "is this the same
-    grammar decision point" across arbitrarily many walks with different
-    active overrides - simpler than tracking a full structural path.
+    (not reset per walk), keyed by an explicit, caller-chosen key (defaulting
+    to `(kind, id(payload))` when the payload is a grammar object with stable
+    identity - grammar objects are constructed once when a dialect module
+    loads and reused for the process's lifetime, so `id()` works there. Kinds
+    whose payload is a plain string or int (template/value alternates, repeat
+    counts) pass an explicit key built from stable parts instead, since
+    string `id()` isn't reliable identity.
     """
 
     dialect: Dialect
     max_depth: int
-    known: dict[tuple[str, int], _Candidate]
+    known: dict[tuple, _Candidate]
     # Vocab-gap names already warned about - shared across every walk in one
     # `generate()` call (like `known`), so each gap prints once per segment
     # rather than once per occurrence.
@@ -173,9 +184,12 @@ class _WalkState:
     # one branch can't cascade into scoring every branch beneath it.
     scoring_probe: bool = False
 
-    def _register(self, kind: str, payload: object) -> Optional[_Candidate]:
+    def _register(
+        self, kind: str, payload: object, key: Optional[tuple] = None
+    ) -> Optional[_Candidate]:
         """Look up (or, if collecting, create) the candidate for this point."""
-        key = (kind, id(payload))
+        if key is None:
+            key = (kind, id(payload))
         candidate = self.known.get(key)
         if candidate is None and self.collecting:
             candidate = _Candidate(
@@ -194,6 +208,42 @@ def _entry_point(name: str, dialect: Dialect):
         raise GenerationError(f"Unknown segment/grammar {name!r}: {err}") from err
 
 
+def _terminal_for(name: Optional[str], state: _WalkState) -> str:
+    """Return a representative literal for an unresolved terminal `name`.
+
+    Registers any *additional* representative values (beyond the first,
+    which is always the default/baseline value) as ordinary "value"
+    candidates, the same way _render_branch registers branch alternates.
+    """
+    if not name:
+        return DEFAULT_FALLBACK
+
+    values = TERMINAL_VOCAB.get(name)
+    if values is None:
+        for suffix, suffix_values in SUFFIX_VOCAB:
+            if name.endswith(suffix):
+                values = suffix_values
+                break
+
+    if values is None:
+        if name not in state.warned:
+            state.warned.add(name)
+            print(
+                f"[generate_dialect_sql] no vocab entry for {name!r}, "
+                f"using fallback {DEFAULT_FALLBACK!r}",
+                file=sys.stderr,
+            )
+        return DEFAULT_FALLBACK
+
+    chosen = values[0]
+    for alt in values[1:]:
+        candidate = state._register("value", alt, key=("value", name, alt))
+        if candidate is not None and candidate.index in state.target_indices:
+            chosen = alt
+            break
+    return chosen
+
+
 def _render(
     matchable: object,
     dialect: Dialect,
@@ -206,14 +256,14 @@ def _render(
     if isinstance(matchable, Ref):
         name = matchable._ref
         if name in active_refs or depth >= state.max_depth:
-            return [_terminal_for(name, state.warned)]
+            return [_terminal_for(name, state)]
         try:
             target = dialect.ref(name)
         except (ValueError, RuntimeError):
             # Some keyword/grammar names are only wired up for certain
             # dialects (e.g. a shared grammar referencing a keyword that
             # one dialect doesn't define) - treat as unresolvable.
-            return [_terminal_for(name, state.warned)]
+            return [_terminal_for(name, state)]
         return _render(target, dialect, name, depth + 1, active_refs | {name}, state)
 
     if isinstance(matchable, type) and issubclass(matchable, BaseSegment):
@@ -223,7 +273,7 @@ def _render(
             return []
         grammar = getattr(matchable, "match_grammar", None)
         if grammar is None:
-            return [_terminal_for(vocab_hint or matchable.__name__, state.warned)]
+            return [_terminal_for(vocab_hint or matchable.__name__, state)]
         return _render(grammar, dialect, vocab_hint, depth, active_refs, state)
 
     if isinstance(matchable, Nothing):
@@ -251,21 +301,30 @@ def _render(
         return _render_sequence(matchable._elements, dialect, depth, active_refs, state)
 
     if isinstance(matchable, AnyNumberOf):
-        return _render_branch(matchable._elements, dialect, depth, active_refs, state)
+        return _render_branch(matchable, dialect, depth, active_refs, state)
 
     if isinstance(matchable, (StringParser, MultiStringParser)):
         template = getattr(matchable, "template", None)
-        if template is None:
-            templates = getattr(matchable, "templates", None)
-            if not templates:
-                # e.g. a MultiStringParser built from an empty dialect set
-                # (some dialects have no "bare functions", etc.)
-                return [_terminal_for(vocab_hint, state.warned)]
-            template = sorted(templates)[0]
-        return [template]
+        if template is not None:
+            return [template]  # StringParser: exactly one possible value.
+        templates = getattr(matchable, "templates", None)
+        if not templates:
+            # e.g. a MultiStringParser built from an empty dialect set
+            # (some dialects have no "bare functions", etc.)
+            return [_terminal_for(vocab_hint, state)]
+        ranked = sorted(templates)
+        chosen = ranked[0]
+        for alt in ranked[1:]:
+            candidate = state._register(
+                "template", alt, key=("template", id(matchable), alt)
+            )
+            if candidate is not None and candidate.index in state.target_indices:
+                chosen = alt
+                break
+        return [chosen]
 
     # RegexParser, TypedParser, or anything else without literal text.
-    return [_terminal_for(vocab_hint, state.warned)]
+    return [_terminal_for(vocab_hint, state)]
 
 
 def _render_sequence(
@@ -333,7 +392,9 @@ def _branch_score(
     `scoring_probe=True`, which makes nested `_render_branch` calls fall back
     to plain element-0 selection instead of calling back into this function.
     It also uses its own throwaway `known` registry, not the real discovery
-    process's, so probing never registers or consumes candidate identities.
+    process's, so probing never registers or consumes candidate identities
+    (harmless even when it tries: `collecting` is False by default, and
+    `_register` only ever creates an entry while collecting).
     `warned` is still the real, shared one, though - a probe can bottom out
     at the same vocab gaps as a real render, and those should count against
     the same once-per-segment budget rather than a separate, discarded one.
@@ -351,13 +412,73 @@ def _branch_score(
         return 10**6
 
 
-def _render_branch(
-    elements: list,
+def _can_repeat(matchable: AnyNumberOf) -> bool:
+    """Can this node meaningfully render its *chosen* element more than once?
+
+    Only `Delimited` - not bare `AnyNumberOf`/`AnySetOf` more generally,
+    despite the plan for this having originally said otherwise. Reasoning,
+    corrected after finding the bug empirically: `_render_branch` picks one
+    `chosen` element from `_elements` and (via this function) considers
+    rendering *that same element* again N times. For `Delimited`, the
+    elements are options for what a single homogeneous list item looks like,
+    so re-rendering the chosen one twice, comma-separated, is exactly a real
+    2-item list. For a bare `AnyNumberOf`/`AnySetOf` with `max_times > 1`
+    (e.g. postgres's `CREATE TABLE` trailing-options node - `PARTITION BY`/
+    `TABLESPACE`/`WITH(OUT) OIDS`/`ON COMMIT`/`USING`, each a *different*
+    optional clause, `max_times=None`), the elements are heterogeneous
+    alternatives, not repeatable content - confirmed generating
+    "WITHOUT OIDS , WITHOUT OIDS" (nonsense: real SQL would need two
+    *different* clauses together, e.g. "TABLESPACE foo WITHOUT OIDS", which
+    `_render_branch`'s single-`chosen` model can't produce). Getting that
+    case right would mean rendering several *different* elements together,
+    not repeating one - a different mechanism than this function provides,
+    and out of scope here. `Delimited` also subclasses `OneOf`, whose
+    `__init__` hardcodes `max_times=1` unconditionally regardless of item
+    count (confirmed: a real column-list `Delimited` still reports
+    `max_times=1`), which is why `max_times` can't be used as the signal
+    even for `Delimited` itself.
+    """
+    return isinstance(matchable, Delimited)
+
+
+def _render_repeated(
+    chosen: object,
+    delimiter: object,
+    count: int,
     dialect: Dialect,
     depth: int,
     active_refs: frozenset[str],
     state: _WalkState,
 ) -> list[str]:
+    """Render `chosen` `count` times, joined by `delimiter`'s own rendering.
+
+    Only ever called for `Delimited` (see `_can_repeat`), which always has a
+    real delimiter - no "no delimiter" case to handle.
+
+    Known, disclosed simplification: each repetition renders the same
+    `chosen` element again via the same deterministic walk, so e.g. a
+    2-column table currently generates two columns with the same name/type
+    ("foo, foo") rather than varied ones. Syntactically fine for what this
+    tests (does the delimiter/trailing-comma/multi-item structure parse) -
+    varying content per repetition is a distinct, separable enhancement.
+    """
+    delim_tokens = _render(delimiter, dialect, None, depth, active_refs, state)
+    tokens: list[str] = []
+    for i in range(count):
+        if i > 0:
+            tokens.extend(delim_tokens)
+        tokens.extend(_render(chosen, dialect, None, depth, active_refs, state))
+    return tokens
+
+
+def _render_branch(
+    matchable: AnyNumberOf,
+    dialect: Dialect,
+    depth: int,
+    active_refs: frozenset[str],
+    state: _WalkState,
+) -> list[str]:
+    elements = matchable._elements
     if not elements:
         return []
     if state.scoring_probe:
@@ -376,6 +497,32 @@ def _render_branch(
         if candidate is not None and candidate.index in state.target_indices:
             chosen = alt
             break  # A OneOf-style choice: at most one alternate can be active.
+
+    if _can_repeat(matchable):
+        # _can_repeat guarantees Delimited here, which always has a real
+        # delimiter (default Ref("CommaSegment")) - never None.
+        delimiter = matchable.delimiter
+        for count in REPEAT_COUNTS:
+            candidate = state._register(
+                "repeat", count, key=("repeat", id(matchable), count)
+            )
+            if candidate is not None and candidate.index in state.target_indices:
+                return _render_repeated(
+                    chosen, delimiter, count, dialect, depth, active_refs, state
+                )
+        if matchable.allow_trailing:
+            candidate = state._register(
+                "trailing", True, key=("trailing", id(matchable))
+            )
+            if candidate is not None and candidate.index in state.target_indices:
+                tokens = _render_repeated(
+                    chosen, delimiter, 2, dialect, depth, active_refs, state
+                )
+                tokens.extend(
+                    _render(delimiter, dialect, None, depth, active_refs, state)
+                )
+                return tokens
+
     return _render(chosen, dialect, None, depth, active_refs, state)
 
 
@@ -383,7 +530,7 @@ def _run_walk(
     entry: object,
     dialect: Dialect,
     max_depth: int,
-    known: dict[tuple[str, int], _Candidate],
+    known: dict[tuple, _Candidate],
     warned: set[str],
     target_indices: frozenset[int] = frozenset(),
     collecting: bool = False,
@@ -410,15 +557,14 @@ def generate(
     """Generate SQL example strings for `segment_name` in `dialect_name`.
 
     `coverage` (0-100, default 0) trades runtime for how much of the grammar
-    gets exercised - see the module docstring. `coverage=0` reproduces the
-    exact output of every earlier version of this tool.
+    gets exercised - see the module docstring.
     """
     discovery_depth, combination_width = _coverage_to_params(coverage)
 
     dialect = dialect_selector(dialect_name)
     entry = _entry_point(segment_name, dialect)
 
-    known: dict[tuple[str, int], _Candidate] = {}
+    known: dict[tuple, _Candidate] = {}
     warned: set[str] = set()
     baseline_tokens, baseline_state = _run_walk(
         entry, dialect, max_depth, known, warned, collecting=True
@@ -475,6 +621,15 @@ def generate(
     return examples
 
 
+def _coverage_to_params(coverage: int) -> tuple[int, int]:
+    """Map a 0-100 coverage value onto (discovery_depth, combination_width)."""
+    if not 0 <= coverage <= 100:
+        raise ValueError(f"coverage must be between 0 and 100, got {coverage}")
+    discovery_depth = round(coverage / 100 * MAX_DISCOVERY_DEPTH)
+    combination_width = max(1, round(coverage / 100 * MAX_COMBINATION_WIDTH))
+    return discovery_depth, combination_width
+
+
 def self_check(dialect_name: str, sql: str) -> bool:
     """Sanity-check that generated SQL parses cleanly under sqlfluff itself.
 
@@ -511,9 +666,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=_coverage_arg,
         default=0,
         help=(
-            "0-100, default 0 (today's minimal behavior). Trades runtime for "
-            "exploring deeper into optional/branch nesting and combining more "
-            "toggles per example. Coarse-grained - see module docstring."
+            "0-100, default 0. Trades runtime for exploring deeper into "
+            "optional/branch nesting and combining more toggles per example. "
+            "Coarse-grained - see module docstring."
         ),
     )
     parser.add_argument(
