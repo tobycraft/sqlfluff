@@ -2,7 +2,7 @@
 
 Consumes SQL from ``generate_dialect_sql.py``'s generator, filters it through
 sqlfluff's own parser (``self_check``), then checks what survives against a
-real engine's parser. Two engines are wired up so far, both embedded (no
+real engine's parser. Three engines are wired up so far, all embedded (no
 server, network, or schema needed):
 
 - Postgres, via ``pglast`` (bundles ``libpg_query``) - a pure parser, so
@@ -17,6 +17,18 @@ server, network, or schema needed):
   non-syntax exception types (``CatalogException`` for a missing table,
   ``BinderException``, ``ConstraintException``, ...) that aren't a syntax
   question at all and must not be treated as one.
+- SparkSQL, via ``pyspark`` (local, in-process Spark - ``local[1]`` master, no
+  cluster). ``pyspark.errors.ParseException`` is a *subclass* of
+  ``pyspark.errors.AnalysisException`` (the semantic-error type), so it must be
+  caught first, same shape as the DuckDB exception filtering. The real cost
+  here isn't execution semantics, it's that starting a ``SparkSession`` takes
+  ~7 seconds - far more than pglast (instant) or duckdb (~13ms/connection) - so
+  unlike the other two checkers, this one reuses a single lazily-created,
+  module-level session across every call instead of a fresh one per call. That
+  makes catalog-state accumulation across calls possible (e.g. an earlier
+  example's ``CREATE TABLE foo`` persisting), but it's a non-issue for the same
+  reason it was for DuckDB: only ``ParseException`` counts as a divergence, and
+  state accumulation only changes *semantic* outcomes, which are ignored.
 
 A pass here means "the pinned engine version this checker uses accepts this,"
 not "every version of that engine sqlfluff's dialect targets accepts this" -
@@ -49,6 +61,14 @@ try:
     import duckdb
 except ImportError:
     duckdb = None
+
+try:
+    import pyspark
+    from pyspark.errors import ParseException, PySparkException
+    from pyspark.sql import SparkSession
+except ImportError:
+    pyspark = None
+    ParseException = PySparkException = SparkSession = None
 
 DEFAULT_SKIPLIST = Path(__file__).resolve().parent / "realengine_skiplist.json"
 
@@ -95,7 +115,62 @@ def check_duckdb(sql: str) -> Optional[str]:
     return None
 
 
-CHECKERS = {"postgres": check_postgres, "duckdb": check_duckdb}
+_spark_session: Optional["SparkSession"] = None
+
+
+def _get_spark_session() -> "SparkSession":
+    """Return a lazily-created, process-wide local SparkSession.
+
+    Session startup takes ~7s, versus near-instant for pglast/duckdb, so
+    (unlike those two) this is created once and reused for every call rather
+    than fresh per call.
+    """
+    global _spark_session
+    if _spark_session is None:
+        _spark_session = (
+            SparkSession.builder.master("local[1]")
+            .appName("realengine_check")
+            .getOrCreate()
+        )
+        _spark_session.sparkContext.setLogLevel("OFF")
+    return _spark_session
+
+
+def check_sparksql(sql: str) -> Optional[str]:
+    """Return an error message if Spark's real parser rejects `sql`.
+
+    Returns None if it accepts it (including if it fails for a non-syntax
+    reason - only a ParseException counts as a divergence; ParseException is
+    a subclass of AnalysisException, so it must be caught first).
+
+    Unlike Postgres/DuckDB, Spark's own exception hierarchy is not an
+    exhaustive catch-all for "anything that isn't a syntax error": some
+    inputs trip Spark's *own* internal bugs (observed: `CREATE STREAMING
+    TABLE foo` raises a raw `py4j.protocol.Py4JJavaError` wrapping a Scala
+    `AssertionError`, entirely outside the `pyspark.errors` hierarchy). None
+    of that is evidence about sqlfluff's grammar, so the fallback catches
+    Exception broadly rather than just PySparkException.
+    """
+    if pyspark is None:
+        raise RuntimeError(
+            "pyspark is not installed. Install it with `pip install pyspark` "
+            "(see requirements_dev.txt). It also requires a local Java runtime."
+        )
+    spark = _get_spark_session()
+    try:
+        spark.sql(sql)
+    except ParseException as err:
+        return str(err)
+    except Exception:
+        return None  # Some other (non-syntax) error - not this tool's concern.
+    return None
+
+
+CHECKERS = {
+    "postgres": check_postgres,
+    "duckdb": check_duckdb,
+    "sparksql": check_sparksql,
+}
 
 
 def load_skiplist(path: Optional[Path]) -> dict[tuple[str, str], str]:
@@ -159,6 +234,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"[realengine_check] checking against duckdb {duckdb.__version__} "
             "(one pinned DuckDB version - a pass here does not cover every "
             "DuckDB version)",
+            file=sys.stderr,
+        )
+    elif args.dialect == "sparksql" and pyspark is not None:
+        print(
+            f"[realengine_check] checking against pyspark {pyspark.__version__} "
+            "(one pinned Spark version - a pass here does not cover every "
+            "Spark version; starting the local Spark session takes ~7s, paid "
+            "once for this whole run)",
             file=sys.stderr,
         )
 

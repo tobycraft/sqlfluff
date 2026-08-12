@@ -45,3 +45,6 @@ fastcore!=1.12.2 # 1.12.2 breaks for python <= 3.11, revisit later
 pglast
 # Real-DuckDB-parser ground truth check (embedded, no server needed).
 duckdb
+# Real-Spark-parser ground truth check (local in-process Spark, no cluster
+# needed - but does require a local Java runtime, unlike pglast/duckdb).
+pyspark

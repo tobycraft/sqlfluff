@@ -137,7 +137,7 @@ bugs before they'd reach a human or a future layer 4.
 **Implemented** as `utils/realengine_check.py` (tests in
 `test/utils/realengine_check_test.py`), consuming layer 3's `generate()` +
 `self_check()` directly (same sys.path import trick as layer 3's own tests, no
-subprocess). Two engines are wired up, both confirmed installed and working
+subprocess). Three engines are wired up, all confirmed installed and working
 in-session, added to `requirements_dev.txt` under "utils/realengine_check.py
 dependencies":
 
@@ -156,20 +156,45 @@ dependencies":
   real execution surfaces many non-syntax exception types (`CatalogException`
   for a missing table, `BinderException`, `ConstraintException`, ...) that must
   not be treated as syntax divergences. Confirmed distinct and reliable by direct
-  test. This is useful precedent for whoever adds a third engine: check for a
-  `json_serialize_sql`-style limitation before assuming a "pure parse" API
-  generalizes past `SELECT`.
+  test.
+- **SparkSQL**, via `pyspark` (local, in-process `local[1]` master - no cluster).
+  `spark.sql()` triggers parse + analysis eagerly, same shape as the other two.
+  Two things this engine taught that the first two didn't:
+  1. **Session startup is ~7s** - far more than pglast (instant) or duckdb
+     (~13ms/connection). A fresh-session-per-call pattern (what postgres/duckdb
+     use) would make a 50-example run take 6+ minutes on session startup alone.
+     Fix: a single `SparkSession` is created lazily on first use and cached at
+     module level (`_get_spark_session()`), reused for every check in the
+     process. Catalog-state accumulation across calls is possible as a result
+     (an earlier example's `CREATE TABLE foo` can persist), but it's a non-issue
+     for the same reason it was for DuckDB - only the syntax-error exception type
+     is treated as a divergence, and state accumulation only changes *semantic*
+     outcomes, which are already ignored.
+  2. **`pyspark.errors.PySparkException` is not an exhaustive catch-all** the
+     way `duckdb.Error`/`pglast.Error` are. `ParseException` is a subclass of
+     `AnalysisException` (so it must be caught first - confirmed:
+     `SELEC 1` -> `ParseException`; `SELECT * FROM nonexistent_tbl` -> plain
+     `AnalysisException`), but some inputs trip Spark's own internal bugs
+     entirely outside that hierarchy - `CREATE STREAMING TABLE foo` raised a raw
+     `py4j.protocol.Py4JJavaError` wrapping a Scala `AssertionError`
+     ("No plan for CreateStreamingTable..."), which crashed the checker on first
+     try. Fixed by broadening the fallback to catch `Exception`, not just
+     `PySparkException` - none of that is evidence about sqlfluff's grammar
+     either way, so it's correctly treated the same as any other non-syntax
+     outcome. Useful precedent for a future engine: don't assume the library's
+     own declared exception hierarchy is exhaustive; verify with a deliberately
+     weird/unsupported statement, not just a clean syntax-error probe.
 
 **What it does:** for each layer-3-generated example that passes sqlfluff's own
-`self_check`, calls the dialect's checker (`check_postgres`/`check_duckdb`).
-Three outcomes: agreement (silent, the expected case), a known divergence (exact
-`(dialect, sql)` pair listed in `utils/realengine_skiplist.json` with a reason -
-printed as `[skipped]`, doesn't fail the run), or an unresolved divergence
-(printed as `[DIVERGENCE]` with the real parse error, fails the run with exit
-code 1). The skiplist starts empty - no divergences have been triaged yet, since
-the backfill audit (item 5 below) is a separate, later step.
+`self_check`, calls the dialect's checker (`check_postgres`/`check_duckdb`/
+`check_sparksql`). Three outcomes: agreement (silent, the expected case), a known
+divergence (exact `(dialect, sql)` pair listed in `utils/realengine_skiplist.json`
+with a reason - printed as `[skipped]`, doesn't fail the run), or an unresolved
+divergence (printed as `[DIVERGENCE]` with the real parse error, fails the run
+with exit code 1). The skiplist starts empty - no divergences have been triaged
+yet, since the backfill audit (item 5 below) is a separate, later step.
 
-**Confirmed working end-to-end** for both engines. Postgres: running against
+**Confirmed working end-to-end** for all three engines. Postgres: running against
 `SelectStatementSegment` and `InsertStatementSegment` surfaced e.g. `SELECT
 DISTINCT` with nothing after it (sqlfluff's grammar allows an empty select list;
 Postgres's real parser doesn't), and `INSERT INTO foo (foo) DEFAULT VALUES`
@@ -178,20 +203,29 @@ Postgres rejects the combination). DuckDB: the same bare `SELECT`/`SELECT
 DISTINCT` finding reproduces (cross-engine confirmation of the same sqlfluff
 grammar gap), plus `CREATE TABLE foo (UNIQUE (foo))` and similar (sqlfluff
 allows a table with only a constraint and no column definitions; DuckDB requires
-at least one column). None of these are in the skiplist - they're live,
+at least one column). SparkSQL: `CREATE TEMP TABLE foo` (Spark requires a
+provider for temp tables), `CREATE LIVE TABLE foo` (rejected outright by Spark's
+parser), and `CREATE TABLE "foo"` (Spark quotes identifiers with backticks, not
+double quotes). None of these are in the skiplist - they're live,
 currently-unresolved findings, not something this task triaged away.
 
 - Each engine pins to one fixed version (Postgres `18.4` via `pglast`, DuckDB
-  `1.5.5` in this environment) - printed at the start of every run. A pass means
-  "the pinned engine version this checker uses accepts this," not "every version
-  of that engine sqlfluff's dialect targets accepts this." Stated in the module
-  docstring and the run banner for both engines; editing CONTRIBUTING.md itself
-  is left for when the CI job lands (deferred, see below).
+  `1.5.5`, PySpark `4.2.0`, all versions as seen in this environment) - printed
+  at the start of every run. A pass means "the pinned engine version this
+  checker uses accepts this," not "every version of that engine sqlfluff's
+  dialect targets accepts this." Stated in the module docstring and the run
+  banner for all three engines; editing CONTRIBUTING.md itself is left for when
+  the CI job lands (deferred, see below).
 - A skiplist convention (`utils/realengine_skiplist.json`, matched by exact
   `(dialect, sql)` string equality since generation is deterministic) lets a
   specific known divergence be marked and excluded with a reason, without
   silently dropping it from view - it still prints as `[skipped]`. Already
-  multi-dialect (keyed by `(dialect, sql)`), so DuckDB needed no skiplist changes.
+  multi-dialect (keyed by `(dialect, sql)`), so neither DuckDB nor SparkSQL
+  needed skiplist changes.
+- Unlike pglast/duckdb (self-contained compiled wheels), PySpark needs a local
+  Java runtime available on the machine - confirmed present and working in this
+  session, but a materially different dependency profile worth calling out
+  explicitly (done, in `requirements_dev.txt` and here).
 
 **Deliberately deferred, not part of what shipped** (same "keep it simple"
 precedent as layer 3):
@@ -245,7 +279,7 @@ an environment with real engine access.
 | 1 | `dialect_grammar_diff.py`: dual-import live-object diff, inheritance-graph-aware (resolves effective grammar for all affected child dialects) + CONTRIBUTING/AGENTS docs | Not started |
 | 2 | `invalid/` fixture convention, test wiring, migrate `test__dialect__rejects_trailing_comma_after_final_cte`, seed fixtures, docs | Not started |
 | 3 | Layer 3 grammar-driven SQL generator: `utils/generate_dialect_sql.py` + `test/utils/generate_dialect_sql_test.py`. Built as one script rather than the original 3a-3d split — see note below. | **Done** |
-| 4 | `realengine_check.py` for postgres (pglast) and duckdb (`duckdb`) + skiplist convention + tests | **Done** — CI job and "no checker for this dialect" PR annotation still not started |
+| 4 | `realengine_check.py` for postgres (pglast), duckdb (`duckdb`), and sparksql (`pyspark`) + skiplist convention + tests | **Done** — CI job and "no checker for this dialect" PR annotation still not started |
 | 5 | Backfill audit of existing postgres fixtures + commit baseline/allowlist for the ~16 known divergences | Not started |
 | 6 | `--base` → `merge-base(base, HEAD)` in both tools, default auto-detects fork point; CI workflow fetches base ref explicitly (shallow-clone fix) | Not started |
 | 7 | Wire `realengine_check.py` to consume layer-3-generated SQL as primary source (fixtures remain for self-consistency tests) | Not started |
