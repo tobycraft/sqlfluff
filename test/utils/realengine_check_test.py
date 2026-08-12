@@ -77,6 +77,30 @@ def test__check_sparksql__does_not_flag_semantic_only_errors():
     assert rec.check_sparksql("SELECT * FROM nonexistent_table_xyz") is None
 
 
+def test__check_clickhouse__accepts_valid_sql():
+    """Valid ClickHouse SQL should report no divergence."""
+    assert rec.check_clickhouse("SELECT * FROM foo") is None
+
+
+def test__check_clickhouse__rejects_invalid_sql():
+    """Invalid ClickHouse syntax should report a parse error message."""
+    error = rec.check_clickhouse("SELEC 1")
+    assert error is not None
+    assert "SYNTAX_ERROR" in error
+
+
+def test__check_clickhouse__does_not_flag_semantic_only_errors():
+    """A missing-table error is not a syntax divergence and must not be flagged.
+
+    chdb doesn't expose typed exceptions the way duckdb/pyspark do - every
+    error is a plain RuntimeError - so check_clickhouse filters by message
+    content instead (only "(SYNTAX_ERROR)" counts). This is the case that
+    justifies that: a missing-table error is also a RuntimeError, but its
+    message ends in "(UNKNOWN_TABLE)", not "(SYNTAX_ERROR)".
+    """
+    assert rec.check_clickhouse("SELECT * FROM nonexistent_table_xyz") is None
+
+
 def test__run__skiplisted_divergence_is_skipped_not_failed(monkeypatch, capsys):
     """A divergence with a matching skiplist entry.
 
@@ -139,6 +163,12 @@ def test__run__end_to_end_smoke_sparksql():
     triggered it - it isn't repeated per test.
     """
     ok = rec.run("sparksql", "CreateTableStatementSegment", 8, 20, skiplist={})
+    assert isinstance(ok, bool)
+
+
+def test__run__end_to_end_smoke_clickhouse():
+    """Same smoke test as above, against the ClickHouse checker."""
+    ok = rec.run("clickhouse", "CreateTableStatementSegment", 8, 20, skiplist={})
     assert isinstance(ok, bool)
 
 

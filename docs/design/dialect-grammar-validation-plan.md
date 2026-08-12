@@ -137,7 +137,7 @@ bugs before they'd reach a human or a future layer 4.
 **Implemented** as `utils/realengine_check.py` (tests in
 `test/utils/realengine_check_test.py`), consuming layer 3's `generate()` +
 `self_check()` directly (same sys.path import trick as layer 3's own tests, no
-subprocess). Three engines are wired up, all confirmed installed and working
+subprocess). Four engines are wired up, all confirmed installed and working
 in-session, added to `requirements_dev.txt` under "utils/realengine_check.py
 dependencies":
 
@@ -184,17 +184,32 @@ dependencies":
      outcome. Useful precedent for a future engine: don't assume the library's
      own declared exception hierarchy is exhaustive; verify with a deliberately
      weird/unsupported statement, not just a clean syntax-error probe.
+- **ClickHouse**, via `chdb` (embedded ClickHouse - no server). Two things
+  simpler here than DuckDB/Spark, one thing harder:
+  - Simpler: `chdb.query()` is already stateless per call (confirmed: a
+    `CREATE TABLE` in one call does not persist to the next), so unlike DuckDB
+    there's no need for an explicit fresh-connection-per-call pattern, and
+    unlike Spark there's no expensive session to reuse - just call it directly.
+  - Harder: `chdb` exposes no typed exceptions at all - every error is a plain
+    `RuntimeError`. So this checker can't filter by exception type like the
+    other three; it filters by *message content* instead. Confirmed reliable
+    across 8 distinct test cases: ClickHouse's own error messages consistently
+    end with a symbolic error name in parentheses (`(SYNTAX_ERROR)` for every
+    genuine syntax error tried; `(UNKNOWN_TABLE)`, `(UNKNOWN_STORAGE)`, etc.
+    for semantic ones), so only `"(SYNTAX_ERROR)" in message` counts as a
+    divergence.
 
 **What it does:** for each layer-3-generated example that passes sqlfluff's own
 `self_check`, calls the dialect's checker (`check_postgres`/`check_duckdb`/
-`check_sparksql`). Three outcomes: agreement (silent, the expected case), a known
-divergence (exact `(dialect, sql)` pair listed in `utils/realengine_skiplist.json`
-with a reason - printed as `[skipped]`, doesn't fail the run), or an unresolved
-divergence (printed as `[DIVERGENCE]` with the real parse error, fails the run
-with exit code 1). The skiplist starts empty - no divergences have been triaged
-yet, since the backfill audit (item 5 below) is a separate, later step.
+`check_sparksql`/`check_clickhouse`). Three outcomes: agreement (silent, the
+expected case), a known divergence (exact `(dialect, sql)` pair listed in
+`utils/realengine_skiplist.json` with a reason - printed as `[skipped]`, doesn't
+fail the run), or an unresolved divergence (printed as `[DIVERGENCE]` with the
+real parse error, fails the run with exit code 1). The skiplist starts empty - no
+divergences have been triaged yet, since the backfill audit (item 5 below) is a
+separate, later step.
 
-**Confirmed working end-to-end** for all three engines. Postgres: running against
+**Confirmed working end-to-end** for all four engines. Postgres: running against
 `SelectStatementSegment` and `InsertStatementSegment` surfaced e.g. `SELECT
 DISTINCT` with nothing after it (sqlfluff's grammar allows an empty select list;
 Postgres's real parser doesn't), and `INSERT INTO foo (foo) DEFAULT VALUES`
@@ -206,22 +221,28 @@ allows a table with only a constraint and no column definitions; DuckDB requires
 at least one column). SparkSQL: `CREATE TEMP TABLE foo` (Spark requires a
 provider for temp tables), `CREATE LIVE TABLE foo` (rejected outright by Spark's
 parser), and `CREATE TABLE "foo"` (Spark quotes identifiers with backticks, not
-double quotes). None of these are in the skiplist - they're live,
+double quotes). ClickHouse: `CREATE TABLE foo ENGINE foo COMMENT foo` - and this
+one traces to a genuine grammar bug, not just a real-vs-sqlfluff feature gap:
+`dialect_clickhouse.py`'s `CREATE TABLE`/`CREATE DATABASE` `COMMENT` clause is
+defined as `OneOf(Ref("SingleIdentifierGrammar"), Ref("QuotedIdentifierSegment"))`,
+which accepts a bare unquoted identifier - real ClickHouse requires a string
+literal (`COMMENT 'foo'`). None of these are in the skiplist - they're live,
 currently-unresolved findings, not something this task triaged away.
 
 - Each engine pins to one fixed version (Postgres `18.4` via `pglast`, DuckDB
-  `1.5.5`, PySpark `4.2.0`, all versions as seen in this environment) - printed
-  at the start of every run. A pass means "the pinned engine version this
-  checker uses accepts this," not "every version of that engine sqlfluff's
-  dialect targets accepts this." Stated in the module docstring and the run
-  banner for all three engines; editing CONTRIBUTING.md itself is left for when
-  the CI job lands (deferred, see below).
+  `1.5.5`, PySpark `4.2.0`, ClickHouse `26.5.1.1` via `chdb`, all versions as
+  seen in this environment) - printed at the start of every run. A pass means
+  "the pinned engine version this checker uses accepts this," not "every
+  version of that engine sqlfluff's dialect targets accepts this." Stated in
+  the module docstring and the run banner for all four engines; editing
+  CONTRIBUTING.md itself is left for when the CI job lands (deferred, see
+  below).
 - A skiplist convention (`utils/realengine_skiplist.json`, matched by exact
   `(dialect, sql)` string equality since generation is deterministic) lets a
   specific known divergence be marked and excluded with a reason, without
   silently dropping it from view - it still prints as `[skipped]`. Already
-  multi-dialect (keyed by `(dialect, sql)`), so neither DuckDB nor SparkSQL
-  needed skiplist changes.
+  multi-dialect (keyed by `(dialect, sql)`), so none of DuckDB, SparkSQL, or
+  ClickHouse needed skiplist changes.
 - Unlike pglast/duckdb (self-contained compiled wheels), PySpark needs a local
   Java runtime available on the machine - confirmed present and working in this
   session, but a materially different dependency profile worth calling out
@@ -279,7 +300,7 @@ an environment with real engine access.
 | 1 | `dialect_grammar_diff.py`: dual-import live-object diff, inheritance-graph-aware (resolves effective grammar for all affected child dialects) + CONTRIBUTING/AGENTS docs | Not started |
 | 2 | `invalid/` fixture convention, test wiring, migrate `test__dialect__rejects_trailing_comma_after_final_cte`, seed fixtures, docs | Not started |
 | 3 | Layer 3 grammar-driven SQL generator: `utils/generate_dialect_sql.py` + `test/utils/generate_dialect_sql_test.py`. Built as one script rather than the original 3a-3d split — see note below. | **Done** |
-| 4 | `realengine_check.py` for postgres (pglast), duckdb (`duckdb`), and sparksql (`pyspark`) + skiplist convention + tests | **Done** — CI job and "no checker for this dialect" PR annotation still not started |
+| 4 | `realengine_check.py` for postgres (pglast), duckdb (`duckdb`), sparksql (`pyspark`), and clickhouse (`chdb`) + skiplist convention + tests | **Done** — CI job and "no checker for this dialect" PR annotation still not started |
 | 5 | Backfill audit of existing postgres fixtures + commit baseline/allowlist for the ~16 known divergences | Not started |
 | 6 | `--base` → `merge-base(base, HEAD)` in both tools, default auto-detects fork point; CI workflow fetches base ref explicitly (shallow-clone fix) | Not started |
 | 7 | Wire `realengine_check.py` to consume layer-3-generated SQL as primary source (fixtures remain for self-consistency tests) | Not started |

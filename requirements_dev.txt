@@ -48,3 +48,6 @@ duckdb
 # Real-Spark-parser ground truth check (local in-process Spark, no cluster
 # needed - but does require a local Java runtime, unlike pglast/duckdb).
 pyspark
+# Real-ClickHouse-parser ground truth check (embedded, self-contained wheel
+# like pglast/duckdb - no server, no JVM).
+chdb

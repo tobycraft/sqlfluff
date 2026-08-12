@@ -29,6 +29,16 @@ server, network, or schema needed):
   example's ``CREATE TABLE foo`` persisting), but it's a non-issue for the same
   reason it was for DuckDB: only ``ParseException`` counts as a divergence, and
   state accumulation only changes *semantic* outcomes, which are ignored.
+- ClickHouse, via ``chdb`` (embedded ClickHouse - no server). ``chdb.query()``
+  is already stateless per call (a ``CREATE TABLE`` in one call does not
+  persist to the next), so there's no fresh-connection or session-reuse
+  concern here at all. But unlike the other three, ``chdb`` doesn't expose
+  typed exceptions - every error is a plain ``RuntimeError``, so this checker
+  filters by *message content* instead of exception type: ClickHouse's error
+  messages reliably end with a symbolic error name in parentheses (confirmed:
+  ``(SYNTAX_ERROR)`` for genuine syntax errors, ``(UNKNOWN_TABLE)``,
+  ``(UNKNOWN_STORAGE)``, etc. for semantic ones), so only messages containing
+  ``"(SYNTAX_ERROR)"`` are treated as a divergence.
 
 A pass here means "the pinned engine version this checker uses accepts this,"
 not "every version of that engine sqlfluff's dialect targets accepts this" -
@@ -69,6 +79,11 @@ try:
 except ImportError:
     pyspark = None
     ParseException = PySparkException = SparkSession = None
+
+try:
+    import chdb
+except ImportError:
+    chdb = None
 
 DEFAULT_SKIPLIST = Path(__file__).resolve().parent / "realengine_skiplist.json"
 
@@ -166,10 +181,35 @@ def check_sparksql(sql: str) -> Optional[str]:
     return None
 
 
+def check_clickhouse(sql: str) -> Optional[str]:
+    """Return an error message if ClickHouse's real parser rejects `sql`.
+
+    Returns None if it accepts it (including if it fails for a non-syntax
+    reason). Unlike the other checkers, chdb doesn't expose typed exceptions -
+    every error is a plain RuntimeError - so this filters by message content:
+    only a message ending in "(SYNTAX_ERROR)" counts as a divergence, not
+    other ClickHouse error kinds like "(UNKNOWN_TABLE)"/"(UNKNOWN_STORAGE)".
+    """
+    if chdb is None:
+        raise RuntimeError(
+            "chdb is not installed. Install it with `pip install chdb` "
+            "(see requirements_dev.txt)."
+        )
+    try:
+        chdb.query(sql, "CSV")
+    except RuntimeError as err:
+        message = str(err)
+        if "(SYNTAX_ERROR)" in message:
+            return message
+        return None  # Some other (non-syntax) error - not this tool's concern.
+    return None
+
+
 CHECKERS = {
     "postgres": check_postgres,
     "duckdb": check_duckdb,
     "sparksql": check_sparksql,
+    "clickhouse": check_clickhouse,
 }
 
 
@@ -242,6 +282,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             "(one pinned Spark version - a pass here does not cover every "
             "Spark version; starting the local Spark session takes ~7s, paid "
             "once for this whole run)",
+            file=sys.stderr,
+        )
+    elif args.dialect == "clickhouse" and chdb is not None:
+        print(
+            f"[realengine_check] checking against chdb {chdb.__version__} "
+            f"(bundles ClickHouse {chdb.engine_version} - a pass here does not "
+            "cover every ClickHouse version)",
             file=sys.stderr,
         )
 
