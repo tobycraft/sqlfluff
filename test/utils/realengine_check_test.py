@@ -26,6 +26,29 @@ def test__check_postgres__rejects_invalid_sql():
     assert "syntax error" in error
 
 
+def test__check_duckdb__accepts_valid_sql():
+    """Valid DuckDB syntax should report no divergence."""
+    assert rec.check_duckdb("SELECT * FROM foo") is None
+
+
+def test__check_duckdb__rejects_invalid_sql():
+    """Invalid DuckDB syntax should report a parse error message."""
+    error = rec.check_duckdb("SELECT * FROM WHERE")
+    assert error is not None
+    assert "syntax error" in error
+
+
+def test__check_duckdb__does_not_flag_semantic_only_errors():
+    """A missing-table error is not a syntax divergence and must not be flagged.
+
+    This is the behavior that justifies catching duckdb.ParserException
+    specifically rather than the broader duckdb.Error - DuckDB has no
+    pure-parse API for non-SELECT statements, so this checker executes for
+    real, and must filter out non-syntax failures rather than flagging them.
+    """
+    assert rec.check_duckdb("SELECT * FROM nonexistent_table_xyz") is None
+
+
 def test__run__skiplisted_divergence_is_skipped_not_failed(monkeypatch, capsys):
     """A divergence with a matching skiplist entry.
 
@@ -70,6 +93,12 @@ def test__run__end_to_end_smoke():
     runs without raising.
     """
     ok = rec.run("postgres", "CreateTableStatementSegment", 8, 20, skiplist={})
+    assert isinstance(ok, bool)
+
+
+def test__run__end_to_end_smoke_duckdb():
+    """Same smoke test as above, against the DuckDB checker."""
+    ok = rec.run("duckdb", "CreateTableStatementSegment", 8, 20, skiplist={})
     assert isinstance(ok, bool)
 
 

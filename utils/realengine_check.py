@@ -2,14 +2,25 @@
 
 Consumes SQL from ``generate_dialect_sql.py``'s generator, filters it through
 sqlfluff's own parser (``self_check``), then checks what survives against a
-real engine's parser. Postgres is wired up via ``pglast`` (bundles
-``libpg_query``; no server, network, or schema needed) - it is the only
-engine covered so far.
+real engine's parser. Two engines are wired up so far, both embedded (no
+server, network, or schema needed):
 
-A pass here means "the Postgres version pglast bundles accepts this," not
-"every Postgres version sqlfluff's postgres dialect targets accepts this" -
-pglast pins to one fixed libpg_query version (printed at the start of every
-run).
+- Postgres, via ``pglast`` (bundles ``libpg_query``) - a pure parser, so
+  ``pglast.Error`` alone is a reliable syntax-only signal.
+- DuckDB, via the ``duckdb`` package. DuckDB has no equivalent pure-parse API
+  for non-SELECT statements (``json_serialize_sql`` looks like one but only
+  supports ``SELECT`` - ``CREATE``/``INSERT``/etc. return
+  ``"Only SELECT statements can be serialized to json!"`` even when the SQL is
+  fine), so this checker executes against a fresh in-memory connection instead
+  and catches ``duckdb.ParserException`` specifically - not the broader
+  ``duckdb.Error``, since executing (rather than just parsing) surfaces many
+  non-syntax exception types (``CatalogException`` for a missing table,
+  ``BinderException``, ``ConstraintException``, ...) that aren't a syntax
+  question at all and must not be treated as one.
+
+A pass here means "the pinned engine version this checker uses accepts this,"
+not "every version of that engine sqlfluff's dialect targets accepts this" -
+each engine pins to one fixed version (printed at the start of every run).
 
 Findings are never dropped silently: SQL that sqlfluff's grammar accepts but
 the real engine rejects (a "divergence") is always printed - either as a
@@ -34,6 +45,11 @@ try:
 except ImportError:
     pglast = None
 
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
+
 DEFAULT_SKIPLIST = Path(__file__).resolve().parent / "realengine_skiplist.json"
 
 
@@ -54,7 +70,32 @@ def check_postgres(sql: str) -> Optional[str]:
     return None
 
 
-CHECKERS = {"postgres": check_postgres}
+def check_duckdb(sql: str) -> Optional[str]:
+    """Return an error message if DuckDB's real parser rejects `sql`.
+
+    Returns None if it accepts it (including if it fails for a non-syntax
+    reason - DuckDB has no pure-parse API for non-SELECT statements, so this
+    executes against a scratch in-memory database and only treats a
+    ParserException as a divergence).
+    """
+    if duckdb is None:
+        raise RuntimeError(
+            "duckdb is not installed. Install it with `pip install duckdb` "
+            "(see requirements_dev.txt)."
+        )
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute(sql)
+    except duckdb.ParserException as err:
+        return str(err)
+    except duckdb.Error:
+        return None  # Some other (non-syntax) error - not this tool's concern.
+    finally:
+        con.close()
+    return None
+
+
+CHECKERS = {"postgres": check_postgres, "duckdb": check_duckdb}
 
 
 def load_skiplist(path: Optional[Path]) -> dict[tuple[str, str], str]:
@@ -105,12 +146,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--skiplist", type=Path, default=DEFAULT_SKIPLIST)
     args = parser.parse_args(argv)
 
-    if pglast is not None:
+    if args.dialect == "postgres" and pglast is not None:
         pg_version = ".".join(str(part) for part in pglast.get_postgresql_version())
         print(
             f"[realengine_check] checking against pglast {pglast.__version__} "
             f"(bundles PostgreSQL {pg_version} grammar - a pass here does not "
             "cover every Postgres version)",
+            file=sys.stderr,
+        )
+    elif args.dialect == "duckdb" and duckdb is not None:
+        print(
+            f"[realengine_check] checking against duckdb {duckdb.__version__} "
+            "(one pinned DuckDB version - a pass here does not cover every "
+            "DuckDB version)",
             file=sys.stderr,
         )
 

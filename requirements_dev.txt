@@ -43,3 +43,5 @@ fastcore!=1.12.2 # 1.12.2 breaks for python <= 3.11, revisit later
 # ----
 # Real-Postgres-parser ground truth check (bundles libpg_query - no server needed).
 pglast
+# Real-DuckDB-parser ground truth check (embedded, no server needed).
+duckdb
