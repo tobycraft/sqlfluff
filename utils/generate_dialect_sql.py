@@ -11,6 +11,24 @@ because it's far more likely to be valid SQL - fewer chances to combine two
 optional clauses that don't make sense together or land in a rarely-used
 optional branch.
 
+By default only the optional elements and branches reachable *while rendering
+the minimal baseline* are ever discovered - anything nested inside an optional
+that's omitted by default, or a branch that isn't chosen, is invisible. The
+``coverage`` parameter (0-100, default 0) trades runtime for looking deeper:
+it internally controls two things -
+
+- how many rounds of "render this known candidate, see what new candidates
+  turn up nested inside it" to run, so e.g. a column-definition list that's
+  itself optional gets rendered at least once, revealing the real column/
+  constraint grammar nested inside it, not just an empty ``()``;
+- how many candidates get toggled on *simultaneously* in one example, so
+  interactions between two optional clauses (not just one at a time against
+  the minimal baseline) get exercised too.
+
+``coverage=100`` is "the most thorough setting this tool considers practical,"
+not literally exhaustive - the true combinatorial space is exponential, and
+``max_examples`` remains a hard cap on total output regardless of ``coverage``.
+
 Terminal matchers that don't carry their own literal text (identifiers, numeric
 and quoted literals, ...) are filled from a small fixed vocabulary keyed by the
 ``Ref`` name that led to them. Recursion is bounded by both a depth limit and a
@@ -73,6 +91,17 @@ BRACKET_CHARS = {
     "angle": ("<", ">"),
 }
 
+# `coverage` (0-100) maps onto these two internal knobs. Deliberately coarse -
+# there are only MAX_DISCOVERY_DEPTH+1 distinct depth values and
+# MAX_COMBINATION_WIDTH distinct width values across the whole 0-100 range, so
+# nearby coverage values frequently produce identical output. That's expected,
+# not a bug: coverage picks a point on a small, discrete grid, not a
+# continuous dial.
+MAX_DISCOVERY_DEPTH = 5  # generous - reaching a real column definition inside
+# CREATE TABLE's (optional) column list only needed depth 2 in testing.
+MAX_COMBINATION_WIDTH = 4  # enough for e.g. WHERE + GROUP BY + ORDER BY +
+# LIMIT together, without approaching factorial blowup.
+
 
 class GenerationError(Exception):
     """Raised when the requested entry point can't be resolved."""
@@ -94,37 +123,61 @@ def _terminal_for(name: Optional[str]) -> str:
     return DEFAULT_FALLBACK
 
 
+def _coverage_to_params(coverage: int) -> tuple[int, int]:
+    """Map a 0-100 coverage value onto (discovery_depth, combination_width)."""
+    if not 0 <= coverage <= 100:
+        raise ValueError(f"coverage must be between 0 and 100, got {coverage}")
+    discovery_depth = round(coverage / 100 * MAX_DISCOVERY_DEPTH)
+    combination_width = max(1, round(coverage / 100 * MAX_COMBINATION_WIDTH))
+    return discovery_depth, combination_width
+
+
 @dataclass
 class _Candidate:
     """One point in the grammar tree where a variant could be generated."""
 
     index: int
-    kind: str  # "add" (include an omitted-by-default optional) or "branch" (pick another option)
-    payload: object  # the alternate element to render (branch candidates only)
+    kind: str  # "add" (an omitted optional) or "branch" (an alternate option)
+    payload: object  # the element to render
+    # Other candidates' global ids that must also be active to reach this one
+    # (its ancestors in the optional/branch nesting).
+    requires: frozenset[int] = frozenset()
 
 
 @dataclass
 class _WalkState:
     """Threaded through one recursive walk of the grammar tree.
 
-    A single walk either just *counts* candidates (target_index is None) or
-    renders the tree while applying one specific override (target_index set).
-    Re-walking the (deterministic) tree once per candidate is simpler than
-    building and cloning an explicit tree structure, and is cheap at the
-    example counts this tool targets.
+    `known` is a registry shared across *every* walk in one `generate()` call
+    (not reset per walk), keyed by `(kind, id(payload))`. Grammar objects are
+    constructed once when a dialect module loads and reused for the process's
+    lifetime, so `id(payload)` is a stable identity for "is this the same
+    grammar decision point" across arbitrarily many walks with different
+    active overrides - simpler than tracking a full structural path.
     """
 
     dialect: Dialect
     max_depth: int
-    target_index: Optional[int] = None
-    target_payload: object = None
-    counter: int = 0
-    candidates: list[_Candidate] = field(default_factory=list)
-    applied: bool = False
+    known: dict[tuple[str, int], _Candidate]
+    target_indices: frozenset[int] = frozenset()
+    collecting: bool = False
+    new_candidates: list[_Candidate] = field(default_factory=list)
     # True while rendering a _branch_score probe: skip the (expensive,
     # recursive) branch-ranking below and just take element 0, so scoring
     # one branch can't cascade into scoring every branch beneath it.
     scoring_probe: bool = False
+
+    def _register(self, kind: str, payload: object) -> Optional[_Candidate]:
+        """Look up (or, if collecting, create) the candidate for this point."""
+        key = (kind, id(payload))
+        candidate = self.known.get(key)
+        if candidate is None and self.collecting:
+            candidate = _Candidate(
+                len(self.known), kind, payload, requires=self.target_indices
+            )
+            self.known[key] = candidate
+            self.new_candidates.append(candidate)
+        return candidate
 
 
 def _entry_point(name: str, dialect: Dialect):
@@ -220,13 +273,9 @@ def _render_sequence(
     tokens: list[str] = []
     for elem in elements:
         if elem.is_optional():
-            idx = state.counter
-            state.counter += 1
-            if state.target_index is None and not state.scoring_probe:
-                state.candidates.append(_Candidate(idx, "add", elem))
-            if idx != state.target_index:
-                continue  # Omitted by default; only the targeted variant adds it.
-            state.applied = True
+            candidate = state._register("add", elem)
+            if candidate is None or candidate.index not in state.target_indices:
+                continue  # Omitted by default; only a targeted variant adds it.
         tokens.extend(_render(elem, dialect, None, depth, active_refs, state))
     return tokens
 
@@ -244,8 +293,12 @@ def _branch_score(elem: object, dialect: Dialect, probe_depth: int = 3) -> int:
     cascade into scoring every branch beneath every branch), so it runs with
     `scoring_probe=True`, which makes nested `_render_branch` calls fall back
     to plain element-0 selection instead of calling back into this function.
+    It also uses its own throwaway `known` registry, not the real discovery
+    process's, so probing never registers or consumes candidate identities.
     """
-    probe_state = _WalkState(dialect=dialect, max_depth=probe_depth, scoring_probe=True)
+    probe_state = _WalkState(
+        dialect=dialect, max_depth=probe_depth, known={}, scoring_probe=True
+    )
     try:
         return len(_render(elem, dialect, None, 0, frozenset(), probe_state))
     except RecursionError:  # pragma: no cover - defensive only
@@ -261,48 +314,102 @@ def _render_branch(
 ) -> list[str]:
     if not elements:
         return []
-    idx = state.counter
-    state.counter += 1
     if state.scoring_probe:
         ranked = elements
     else:
         ranked = sorted(elements, key=lambda e: _branch_score(e, dialect))
-    chosen = ranked[0]
-    if state.target_index is None and not state.scoring_probe:
-        for other in ranked[1:]:
-            state.candidates.append(_Candidate(idx, "branch", other))
-    elif idx == state.target_index:
-        state.applied = True
-        chosen = state.target_payload
+    chosen = ranked[0]  # The default: whichever alternate isn't targeted renders this.
+    for alt in ranked[1:]:
+        candidate = state._register("branch", alt)
+        if candidate is not None and candidate.index in state.target_indices:
+            chosen = alt
+            break  # A OneOf-style choice: at most one alternate can be active.
     return _render(chosen, dialect, None, depth, active_refs, state)
 
 
 def _run_walk(
-    entry: object, dialect: Dialect, max_depth: int, target: Optional[_Candidate]
+    entry: object,
+    dialect: Dialect,
+    max_depth: int,
+    known: dict[tuple[str, int], _Candidate],
+    target_indices: frozenset[int] = frozenset(),
+    collecting: bool = False,
 ) -> tuple[list[str], _WalkState]:
-    state = _WalkState(dialect=dialect, max_depth=max_depth)
-    if target is not None:
-        state.target_index = target.index
-        # _render_branch reads the override payload off the state for
-        # "branch" candidates; "add" candidates are handled inline by index.
-        state.target_payload = target.payload
+    state = _WalkState(
+        dialect=dialect,
+        max_depth=max_depth,
+        known=known,
+        target_indices=target_indices,
+        collecting=collecting,
+    )
     tokens = _render(entry, dialect, None, 0, frozenset(), state)
     return tokens, state
 
 
 def generate(
-    dialect_name: str, segment_name: str, max_depth: int = 8, max_examples: int = 50
+    dialect_name: str,
+    segment_name: str,
+    max_depth: int = 8,
+    max_examples: int = 50,
+    coverage: int = 0,
 ) -> list[str]:
-    """Generate SQL example strings for `segment_name` in `dialect_name`."""
+    """Generate SQL example strings for `segment_name` in `dialect_name`.
+
+    `coverage` (0-100, default 0) trades runtime for how much of the grammar
+    gets exercised - see the module docstring. `coverage=0` reproduces the
+    exact output of every earlier version of this tool.
+    """
+    discovery_depth, combination_width = _coverage_to_params(coverage)
+
     dialect = dialect_selector(dialect_name)
     entry = _entry_point(segment_name, dialect)
 
-    baseline_tokens, state = _run_walk(entry, dialect, max_depth, target=None)
+    known: dict[tuple[str, int], _Candidate] = {}
+    baseline_tokens, baseline_state = _run_walk(
+        entry, dialect, max_depth, known, collecting=True
+    )
     examples = [" ".join(baseline_tokens)]
 
-    for candidate in state.candidates[: max_examples - 1]:
-        tokens, _ = _run_walk(entry, dialect, max_depth, target=candidate)
-        examples.append(" ".join(tokens))
+    # Discovery: for `discovery_depth` rounds, render each just-found
+    # candidate on its own (with whatever prerequisites reach it) and see
+    # what *new* candidates turn up nested inside it. Bounded by a safety cap
+    # so a high coverage value on a heavily self-referential grammar (e.g.
+    # expressions) can't run away.
+    max_discovery_walks = max(50, max_examples * 10)
+    discovery_walks = 0
+    frontier = list(baseline_state.new_candidates)
+    for _round in range(discovery_depth):
+        if not frontier:
+            break
+        next_frontier: list[_Candidate] = []
+        for candidate in frontier:
+            if discovery_walks >= max_discovery_walks:
+                break
+            discovery_walks += 1
+            target = candidate.requires | {candidate.index}
+            _, round_state = _run_walk(
+                entry, dialect, max_depth, known, target_indices=target, collecting=True
+            )
+            next_frontier.extend(round_state.new_candidates)
+        frontier = next_frontier
+
+    all_candidates = list(known.values())
+
+    seen_texts = set(examples)
+    for i, candidate in enumerate(all_candidates):
+        if len(examples) >= max_examples:
+            break
+        target = set(candidate.requires) | {candidate.index}
+        for width_offset in range(1, combination_width):
+            other = all_candidates[(i + width_offset) % len(all_candidates)]
+            target |= set(other.requires) | {other.index}
+        tokens, _ = _run_walk(
+            entry, dialect, max_depth, known, target_indices=frozenset(target)
+        )
+        text = " ".join(tokens)
+        if text not in seen_texts:
+            seen_texts.add(text)
+            examples.append(text)
 
     return examples
 
@@ -322,6 +429,15 @@ def self_check(dialect_name: str, sql: str) -> bool:
     return not parsed.violations
 
 
+def _coverage_arg(value: str) -> int:
+    coverage = int(value)
+    if not 0 <= coverage <= 100:
+        raise argparse.ArgumentTypeError(
+            f"--coverage must be between 0 and 100, got {coverage}"
+        )
+    return coverage
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point: generate examples and print those that self-check."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -329,6 +445,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--segment", required=True)
     parser.add_argument("--max-depth", type=int, default=8)
     parser.add_argument("--max-examples", type=int, default=50)
+    parser.add_argument(
+        "--coverage",
+        type=_coverage_arg,
+        default=0,
+        help=(
+            "0-100, default 0 (today's minimal behavior). Trades runtime for "
+            "exploring deeper into optional/branch nesting and combining more "
+            "toggles per example. Coarse-grained - see module docstring."
+        ),
+    )
     parser.add_argument(
         "--skip-self-check",
         action="store_true",
@@ -338,7 +464,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         examples = generate(
-            args.dialect, args.segment, args.max_depth, args.max_examples
+            args.dialect,
+            args.segment,
+            args.max_depth,
+            args.max_examples,
+            args.coverage,
         )
     except GenerationError as err:
         print(f"error: {err}", file=sys.stderr)

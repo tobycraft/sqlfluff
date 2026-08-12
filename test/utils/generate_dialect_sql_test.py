@@ -11,7 +11,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utils"))
 
-from generate_dialect_sql import GenerationError, generate, self_check  # noqa: E402
+from generate_dialect_sql import (  # noqa: E402
+    GenerationError,
+    generate,
+    main,
+    self_check,
+)
 
 
 @pytest.mark.parametrize(
@@ -53,3 +58,79 @@ def test__generate_dialect_sql__self_referential_grammar_terminates():
     """
     examples = generate("ansi", "ExpressionSegment", max_depth=6, max_examples=10)
     assert examples
+
+
+def test__generate_dialect_sql__zero_coverage_matches_default():
+    """coverage=0 (the default) must be indistinguishable from omitting it.
+
+    This is the backward-compatibility contract for the coverage parameter.
+    """
+    with_default = generate("postgres", "CreateTableStatementSegment", 8, 20)
+    with_explicit_zero = generate(
+        "postgres", "CreateTableStatementSegment", 8, 20, coverage=0
+    )
+    assert with_default == with_explicit_zero
+
+
+def test__generate_dialect_sql__high_coverage_reaches_nested_content():
+    """High coverage should discover content invisible at coverage=0.
+
+    postgres/CreateTableStatementSegment's column list is itself optional, so
+    at coverage=0 it's always omitted (baseline renders as bare
+    "CREATE TABLE foo ( )"): candidate discovery only looks at what's visible
+    while rendering the minimal baseline, so nothing inside that omitted
+    column list - real column definitions, constraints - is ever found.
+    coverage=100 adds discovery rounds that render already-known optional/
+    branch points and look for *new* candidates nested inside them, which
+    should surface something with real content in the column list.
+    """
+    baseline_only = generate(
+        "postgres", "CreateTableStatementSegment", 8, 40, coverage=0
+    )
+    assert baseline_only[0] == "CREATE TABLE foo ( )"
+
+    thorough = generate("postgres", "CreateTableStatementSegment", 8, 40, coverage=100)
+    assert any(
+        len(example.split()) > len(baseline_only[0].split()) for example in thorough
+    )
+
+
+def test__generate_dialect_sql__mid_coverage_combines_candidates():
+    """Mid-range coverage should produce examples with 2+ non-baseline elements.
+
+    At coverage=0 every example is exactly one toggle away from the minimal
+    baseline; combination width > 1 (reached above coverage=0) should produce
+    at least one example where two independent optional SELECT clauses are
+    both present simultaneously.
+    """
+    examples = generate("ansi", "SelectStatementSegment", 8, 40, coverage=60)
+    clause_keywords = ("WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET")
+
+    def clause_count(example: str) -> int:
+        tokens = example.split()
+        return sum(1 for kw in clause_keywords if kw in tokens)
+
+    assert any(clause_count(example) >= 2 for example in examples)
+
+
+def test__generate_dialect_sql__coverage_out_of_range_raises():
+    """An out-of-range coverage value should fail clearly, not silently."""
+    with pytest.raises(ValueError):
+        generate("ansi", "SelectStatementSegment", 8, 10, coverage=-1)
+    with pytest.raises(ValueError):
+        generate("ansi", "SelectStatementSegment", 8, 10, coverage=101)
+
+
+def test__main__coverage_out_of_range_rejected_by_cli():
+    """An out-of-range --coverage should fail argparse validation."""
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--dialect",
+                "ansi",
+                "--segment",
+                "SelectStatementSegment",
+                "--coverage",
+                "101",
+            ]
+        )

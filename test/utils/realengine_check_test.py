@@ -172,6 +172,14 @@ def test__run__end_to_end_smoke_clickhouse():
     assert isinstance(ok, bool)
 
 
+def test__run__coverage_forwards_to_generate():
+    """Coverage should pass through run() to generate_dialect_sql.generate."""
+    ok = rec.run(
+        "duckdb", "CreateTableStatementSegment", 8, 20, skiplist={}, coverage=60
+    )
+    assert isinstance(ok, bool)
+
+
 def test__main__unknown_dialect_rejected_by_cli():
     """An unsupported --dialect value should fail argparse validation."""
     with pytest.raises(SystemExit):

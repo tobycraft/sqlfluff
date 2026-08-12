@@ -121,6 +121,46 @@ variants on top of. Bounded by `--max-depth` (cycle guard + recursion cap) and
 sqlfluff's own `Linter` (`self_check`) before being printed, catching generator
 bugs before they'd reach a human or a future layer 4.
 
+**Configurable coverage (`--coverage 0-100`), added after the fact.** The
+original single-toggle-from-baseline design turned out to have two compounding
+limitations, found by direct investigation of `postgres`/`CreateTableStatementSegment`:
+its baseline renders as bare `CREATE TABLE foo ( )` — the column list is itself
+`optional=True`, so it's omitted by default — and because candidate discovery
+only ever registered new candidates during the *baseline* walk, nothing nested
+inside that omitted column list (real column definitions, constraints) was
+reachable at *any* `--max-examples`, not just deprioritized. Separately, every
+example was exactly one toggle away from baseline, so interacting optional
+clauses (e.g. `WHERE` + `GROUP BY` together) were never exercised jointly.
+
+Fixed by generalizing `_WalkState.target_index: Optional[int]` to
+`target_indices: frozenset[int]`, switching candidate identity from a
+per-walk position counter to `(kind, id(payload))` (grammar objects are
+constructed once per dialect load and reused for the process's lifetime, so
+`id()` is a stable cross-walk identity), and adding a `requires: frozenset[int]`
+field to each candidate (its prerequisite chain of ancestor optional/branch
+points). This enabled two internal mechanisms: **discovery rounds** (render an
+already-known candidate, look for *new* candidates nested inside it, repeat)
+and **combination width** (toggle several known candidates on simultaneously in
+one example, round-robin through the candidate list). A single `--coverage
+0-100` CLI flag maps onto both via a fixed formula
+(`discovery_depth = round(coverage/100 * 5)`,
+`combination_width = max(1, round(coverage/100 * 4))`) — considered exposing the
+two knobs separately, but simplicity won out; `coverage=100` means "the most
+thorough setting this tool considers practical," not literally exhaustive
+(`--max-examples` still caps output regardless). `coverage=0` is the default and
+was verified to reproduce the pre-existing behavior for every case in the test
+suite (one incidental, disclosed improvement: output is now deduped by exact
+text, since the old code could emit byte-identical examples more than once).
+
+Confirmed working: `postgres`/`CreateTableStatementSegment --coverage 100`
+reaches real column definitions with `NULL`/`CHECK`/`WITH OPTIONS` constraints
+and partition clauses (`FOR VALUES FROM ... TO ...`) that `--coverage 0` could
+never produce, and running that richer output through layer 4's `check_duckdb`
+immediately found new divergences (e.g. `CREATE TABLE foo (CHECK (CURRENT_CATALOG))`)
+that the old shallow generation never surfaced. No crashes across all 28
+dialects at `--coverage 50`/`100`, and a worst-case self-referential entry point
+(`ExpressionSegment` at `--coverage 100`) still completes in ~1s.
+
 **Deliberately deferred, not part of what shipped:**
 - Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").
 - Base-vs-head generation to filter pre-existing issues surfaced via shared/
@@ -130,7 +170,6 @@ bugs before they'd reach a human or a future layer 4.
   surface as a finding.
 - Per-dialect vocabulary overrides (the shared dict has covered every dialect
   tried so far; dialect-specific overrides can be added if a gap turns up).
-- Feeding output to a real-engine check (layer 4) — this only produces text.
 
 ### Layer 4 — Real-engine ground truth
 

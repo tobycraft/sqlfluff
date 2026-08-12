@@ -227,10 +227,11 @@ def run(
     max_depth: int,
     max_examples: int,
     skiplist: dict[tuple[str, str], str],
+    coverage: int = 0,
 ) -> bool:
     """Run the check. Returns True if there are no unresolved divergences."""
     checker = CHECKERS[dialect]
-    examples = gds.generate(dialect, segment, max_depth, max_examples)
+    examples = gds.generate(dialect, segment, max_depth, max_examples, coverage)
     ok = True
     for sql in examples:
         if not gds.self_check(dialect, sql):
@@ -258,6 +259,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--segment", required=True)
     parser.add_argument("--max-depth", type=int, default=8)
     parser.add_argument("--max-examples", type=int, default=50)
+    parser.add_argument(
+        "--coverage",
+        type=gds._coverage_arg,
+        default=0,
+        help="0-100, forwarded to generate_dialect_sql.py - see its --help.",
+    )
     parser.add_argument("--skiplist", type=Path, default=DEFAULT_SKIPLIST)
     args = parser.parse_args(argv)
 
@@ -295,7 +302,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         skiplist = load_skiplist(args.skiplist)
         ok = run(
-            args.dialect, args.segment, args.max_depth, args.max_examples, skiplist
+            args.dialect,
+            args.segment,
+            args.max_depth,
+            args.max_examples,
+            skiplist,
+            args.coverage,
         )
     except (gds.GenerationError, RuntimeError) as err:
         print(f"error: {err}", file=sys.stderr)
