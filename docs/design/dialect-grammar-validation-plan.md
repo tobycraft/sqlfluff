@@ -89,33 +89,48 @@ convention: SQL that must fail to parse, collected and run automatically by
 
 ### Layer 3 — Grammar-driven SQL generation
 
-Walks the actual grammar objects sqlfluff builds in memory for a dialect, starting
-from the segments layer 1 flags as changed, and renders concrete SQL text. Broken
-into explicit sub-phases given its size:
+**Implemented** as a single script, `utils/generate_dialect_sql.py` (tests in
+`test/utils/generate_dialect_sql_test.py`), rather than the four-sub-phase split
+originally sketched here. Reading the actual grammar primitives
+(`src/sqlfluff/core/parser/grammar/`) showed the problem was smaller in practice
+than in the abstract:
 
-1. **Declarative-grammar walker**: `Sequence`, `OneOf`, `AnySetOf`, `AnyNumberOf`,
-   `Bracketed`, `Delimited`, `Ref` — with/without each optional, one example per
-   `OneOf`/`AnySetOf` branch.
-2. **Terminal vocabulary strategy**: a small fixed vocabulary of representative
-   identifiers/literals/keywords, per dialect where dialect-specific quoting or
-   literal syntax applies.
-3. **Fallback strategy for non-declarative segments**: an explicit, documented
-   answer for segments whose matching is hand-written Python (`RegexParser`/
-   `StringParser` subclasses, custom `match()` overrides) rather than a composed
-   grammar object — these can't be walked the same way and need either a manual
-   vocabulary hook or an explicit "not generatable, needs a hand fixture" marker.
-4. **Bounds**: a recursion depth limit, plus an explicit per-PR generation breadth
-   budget (cap on total generated examples), since nested optional/branch
-   combinatorics under one changed high-level clause can otherwise blow up before
-   the real-engine check is ever invoked. Budget enforcement happens before layer 4
-   runs, so it's what actually protects the "fast enough for synchronous CI"
-   requirement.
-5. Generation targets whole minimal statements, not bare fragments, since a clause
-   is often only meaningful inside a full `SELECT`/`CREATE`/etc.
-6. **Base-vs-head generation** filters pre-existing issues surfaced via shared/
-   `Ref`'d grammar: the same targeted element is generated from both the base and
-   head versions of the grammar (via the isolated dual-import from layer 1), and
-   only a real-engine verdict that changed between the two surfaces as a finding.
+- `dialect_selector(name)` returns an already-expanded `Dialect`, so
+  `SegmentGenerator` lambdas are pre-resolved — nothing extra to handle.
+- `AnyNumberOf.is_optional()` already encodes "optional, or `min_times == 0`",
+  and `OneOf`/`AnySetOf`/`Delimited` all inherit from it — one branch-handling
+  code path covers all three.
+- Terminal literals split into two buckets: `StringParser`/`MultiStringParser`
+  carry their own text; everything else (mostly identifiers/literals) is reached
+  through a `Ref` with a small, predictable set of naming patterns
+  (`NakedIdentifierSegment`, `TableReferenceSegment`, ...), so one small exact-name
+  dict plus a handful of suffix rules (`*IdentifierSegment`, `*ReferenceGrammar`,
+  ...) covers the large majority of dialects without per-dialect vocabularies.
+
+**What it does:** walks `Sequence`/`OneOf`/`AnySetOf`/`AnyNumberOf`/`Bracketed`/
+`Delimited`/`Ref` from a named entry point (`--dialect`, `--segment`) and renders
+a **minimal baseline** (every optional element omitted) plus one variant per
+optional element (added back in) and one variant per `OneOf`/`AnySetOf` branch
+(swapped in, ranked by a shallow "shortest render wins" probe so branch selection
+doesn't default to whichever exotic form is listed first). Minimal-as-baseline
+was a fix made during implementation: an "everything present" baseline was tried
+first and almost never parsed cleanly (optional clauses combining in ways real
+grammars don't expect); minimal is far more robust to build single-change
+variants on top of. Bounded by `--max-depth` (cycle guard + recursion cap) and
+`--max-examples` (breadth cap). Every generated example is filtered through
+sqlfluff's own `Linter` (`self_check`) before being printed, catching generator
+bugs before they'd reach a human or a future layer 4.
+
+**Deliberately deferred, not part of what shipped:**
+- Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").
+- Base-vs-head generation to filter pre-existing issues surfaced via shared/
+  `Ref`'d grammar: the same targeted element would be generated from both the
+  base and head versions of the grammar (via the isolated dual-import from
+  layer 1) and only a real-engine verdict that changed between the two would
+  surface as a finding.
+- Per-dialect vocabulary overrides (the shared dict has covered every dialect
+  tried so far; dialect-specific overrides can be added if a gap turns up).
+- Feeding output to a real-engine check (layer 4) — this only produces text.
 
 ### Layer 4 — Real-engine ground truth
 
@@ -173,10 +188,7 @@ an environment with real engine access.
 |---|------|--------|
 | 1 | `dialect_grammar_diff.py`: dual-import live-object diff, inheritance-graph-aware (resolves effective grammar for all affected child dialects) + CONTRIBUTING/AGENTS docs | Not started |
 | 2 | `invalid/` fixture convention, test wiring, migrate `test__dialect__rejects_trailing_comma_after_final_cte`, seed fixtures, docs | Not started |
-| 3a | Layer 3 declarative-grammar walker (`Sequence`/`OneOf`/`AnySetOf`/`AnyNumberOf`/`Bracketed`/`Delimited`/`Ref`, with/without-optional + per-branch) | Not started |
-| 3b | Layer 3 terminal vocabulary strategy (per-dialect literals/identifiers/keywords) | Not started |
-| 3c | Layer 3 fallback strategy for hand-written (non-declarative) segments | Not started |
-| 3d | Layer 3 breadth budget + depth limit enforcement | Not started |
+| 3 | Layer 3 grammar-driven SQL generator: `utils/generate_dialect_sql.py` + `test/utils/generate_dialect_sql_test.py`. Built as one script rather than the original 3a-3d split — see note below. | **Done** |
 | 4 | `realengine_check.py` for postgres (pglast), documented PG-version caveat, `realengine-skip` convention, "no checker for this dialect" PR annotation, CI job | Not started |
 | 5 | Backfill audit of existing postgres fixtures + commit baseline/allowlist for the ~16 known divergences | Not started |
 | 6 | `--base` → `merge-base(base, HEAD)` in both tools, default auto-detects fork point; CI workflow fetches base ref explicitly (shallow-clone fix) | Not started |
