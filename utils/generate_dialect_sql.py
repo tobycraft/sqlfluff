@@ -51,6 +51,7 @@ from sqlfluff.core.dialects import dialect_selector
 from sqlfluff.core.dialects.base import Dialect
 from sqlfluff.core.parser.grammar.anyof import AnyNumberOf
 from sqlfluff.core.parser.grammar.base import Nothing, Ref
+from sqlfluff.core.parser.grammar.conditional import Conditional
 from sqlfluff.core.parser.grammar.sequence import Bracketed, Sequence
 from sqlfluff.core.parser.parsers import MultiStringParser, StringParser
 from sqlfluff.core.parser.segments import BaseSegment, MetaSegment
@@ -230,6 +231,15 @@ def _render(
         # renders as nothing, same as an omitted optional element.
         return []
 
+    if isinstance(matchable, Conditional):
+        # Wraps an Indent/Dedent meta segment that only fires based on
+        # reflow config rules - like MetaSegment above, no raw text of its
+        # own. Without this case it fell through to the generic terminal
+        # fallback and rendered as a stray "1", corrupting otherwise-valid
+        # output (confirmed: mariadb's FromExpressionSegment renders "DUAL
+        # 1 1" instead of "DUAL" - the two "1"s are two Conditionals).
+        return []
+
     if isinstance(matchable, Bracketed):
         open_c, close_c = BRACKET_CHARS.get(matchable.bracket_type, ("(", ")"))
         inner = _render_sequence(
@@ -285,6 +295,28 @@ def _render_sequence(
     return tokens
 
 
+def _prefers_reference(elem: object) -> bool:
+    """Tie-break hint: does this option look like the "plain identifier" case?
+
+    Several grammars offer a keyword/bare-function alternative alongside a
+    plain table/column reference in the same OneOf (e.g. `TableExpressionSegment`
+    - shared by nearly every dialect - lists `BareFunctionSegment` ahead of
+    `TableReferenceSegment`). A bare keyword resolves in a single token just
+    like a plain reference does, so `_branch_score` alone often ties them, and
+    the stable sort then silently prefers whichever was declared first - which
+    is the special case here, not the common one. Confirmed concretely:
+    mariadb's `DeleteStatementSegment` generated only `DELETE FROM CURRENT_DATE
+    ...` (a bare no-parens datetime function standing in for a table name)
+    because `BareFunctionSegment` beat `TableReferenceSegment` on exactly this
+    tie. Reuses the same suffix convention as `SUFFIX_VOCAB` - a `Ref` name
+    ending in one of these means "this is what a real identifier/reference
+    looks like here," which is what a tie should resolve in favor of.
+    """
+    if not isinstance(elem, Ref):
+        return False
+    return any(elem._ref.endswith(suffix) for suffix, _ in SUFFIX_VOCAB)
+
+
 def _branch_score(
     elem: object, dialect: Dialect, warned: set[str], probe_depth: int = 3
 ) -> int:
@@ -331,7 +363,13 @@ def _render_branch(
     if state.scoring_probe:
         ranked = elements
     else:
-        ranked = sorted(elements, key=lambda e: _branch_score(e, dialect, state.warned))
+        ranked = sorted(
+            elements,
+            key=lambda e: (
+                _branch_score(e, dialect, state.warned),
+                0 if _prefers_reference(e) else 1,
+            ),
+        )
     chosen = ranked[0]  # The default: whichever alternate isn't targeted renders this.
     for alt in ranked[1:]:
         candidate = state._register("branch", alt)

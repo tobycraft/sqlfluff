@@ -172,6 +172,36 @@ Fixed by threading a `warned: set[str]` through `_WalkState` the same way
 would otherwise warn into a separate, discarded set) - so each gap name
 prints at most once per segment. Same run: 134 lines, one per distinct name.
 
+**Two more bugs found via a user report of zero output** (`--dialect mariadb
+--segment DeleteStatementSegment`), both in grammar shared across most
+dialects, so the fix generalized rather than being a one-off patch:
+
+1. `TableExpressionSegment` - used by nearly every dialect's FROM clause -
+   lists `Ref("BareFunctionSegment")` (bare no-parens functions like
+   `CURRENT_DATE`) ahead of `Ref("TableReferenceSegment")`. Both resolve in a
+   single token, so `_branch_score` ties them, and the stable sort silently
+   picked whichever was declared first - the special case, not the normal
+   one. Confirmed: `mariadb`/`DeleteStatementSegment` generated only `DELETE
+   FROM CURRENT_DATE ...`, self-check failing every single example. Fixed
+   with a secondary sort key, `_prefers_reference`: on a score tie, prefer a
+   `Ref` whose name matches the same `SUFFIX_VOCAB` identifier/reference
+   suffixes already used for terminal vocab - a principled, reusable
+   tie-break rather than a mariadb-specific special case.
+2. `Conditional` grammar objects (wrap an `Indent`/`Dedent` meta segment that
+   only fires per reflow config - confirmed by inspecting `Conditional.__init__`)
+   weren't recognized by `_render`'s dispatch at all, so they fell through to
+   the generic terminal fallback and rendered as a stray `"1"` - e.g. `FROM
+   DUAL 1 1` instead of `FROM DUAL`, corrupting output that was otherwise
+   correct. Fixed by giving `Conditional` the same empty-render treatment as
+   the existing `MetaSegment` case.
+
+Backfilled a before/after comparison across 8 dialects x 3 segments: 4
+dialects (`ansi`, `mysql`, `mariadb`, `sqlite`) had a **zero-valid-example**
+`DeleteStatementSegment` before this fix (the `Conditional` bug is in
+`FromExpressionSegment`, which `DELETE ... FROM` shares with `SELECT`), all
+now produce valid output; other segments saw smaller improvements. Full
+28-dialect x 3-segment crash sweep stayed clean throughout.
+
 **Deliberately deferred, not part of what shipped:**
 - Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").
 - Base-vs-head generation to filter pre-existing issues surfaced via shared/

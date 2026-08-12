@@ -163,3 +163,23 @@ def test__main__vocab_warnings_print_once_per_segment(capsys):
     ]
     assert warning_lines, "expected at least one vocab-gap warning in this scenario"
     assert len(warning_lines) == len(set(warning_lines))
+
+
+@pytest.mark.parametrize("dialect", ["ansi", "mysql", "mariadb", "sqlite"])
+def test__generate_dialect_sql__delete_statement_produces_valid_examples(dialect):
+    """Regression test: these produced zero valid examples at all.
+
+    Two compounding bugs, both in grammar shared across many dialects: (1)
+    `TableExpressionSegment`'s branch-score tie between `BareFunctionSegment`
+    (a bare no-parens function like CURRENT_DATE) and `TableReferenceSegment`
+    was silently broken by declaration order, picking the function over a
+    real table reference; (2) `Conditional` grammar objects (reflow-only
+    Indent/Dedent markers) weren't recognized by the renderer's dispatch, so
+    they fell through to the terminal fallback and rendered as a stray "1",
+    corrupting otherwise-valid output (e.g. "FROM DUAL 1 1" instead of
+    "FROM DUAL"). Confirmed both fixed: this used to generate 0 valid examples
+    for all four of these dialects.
+    """
+    examples = generate(dialect, "DeleteStatementSegment", max_depth=8, max_examples=20)
+    valid = [sql for sql in examples if self_check(dialect, sql)]
+    assert valid, f"no valid DELETE example generated for {dialect}"
