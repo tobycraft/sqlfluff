@@ -314,6 +314,71 @@ signature - a clean removal rather than a deprecated-but-ignored parameter,
 consistent with this being internal dev tooling with no external callers to
 stay compatible with.
 
+**Heuristic default-choice replaced with seeded randomness.** You didn't
+like any "smartness" driving which option a decision point renders by
+default - `_branch_score`'s shortest-render-wins heuristic (branch
+selection), `values[0]`/`sorted(templates)[0]` (terminal vocab,
+`MultiStringParser` keywords), and the always-1-item `Delimited` baseline.
+Explicit scope, confirmed via a follow-up question: all four become
+random-with-seed, not just branch selection.
+
+The one real design constraint: `generate()`'s discovery/combination
+machinery depends on a decision point rendering *consistently* across the
+many separate `_run_walk` calls one `generate()` call makes (two walks
+targeting the same candidate must produce the same text; unrelated
+candidates mustn't shift because some other walk touched a different part
+of the tree) - so "random" means "roll once per decision point, the first
+time it's encountered in a given `generate()` call, then remember it,"
+not "re-roll on every render." Implemented via two new `_WalkState` fields
+threaded through every walk the same way `known`/`warned` already are:
+`rng: random.Random` and `defaults: dict[tuple, object]` (the memoization
+table). One new method, `_choose(kind, key, options, key_fn=None)`,
+replaced the bespoke "pick element 0, register the rest" pattern that used
+to be duplicated at all four call sites: look up (or draw and cache) this
+key's random default from `options`, then still walk every non-default
+option and register it as an ordinary candidate exactly as before - a
+`--coverage`-targeted walk can still render any of them regardless of what
+the random default was. `_branch_score`/`_prefers_reference` (and
+`_WalkState.scoring_probe`, which existed only to support the former's
+probe) are now dead code and were deleted rather than left unused. The
+`Delimited` repeat/trailing logic was unified into one `"count"` candidate
+kind covering `1`/`2`/`3`/`"trailing"` as a single random "shape" choice
+(previously two separate, sequentially-checked `"repeat"`/`"trailing"`
+kinds), since it's now naturally one decision instead of a priority list.
+`--seed` was added to both CLIs and to `generate()`'s signature; omitting
+it draws a fresh seed and prints it to stderr so a specific run can be
+reproduced later - confirmed the same `--seed` twice gives byte-identical
+output, and a printed auto-seed passed back in reproduces that exact run.
+
+**Real, pre-existing bug found via this change, not caused by it: token
+joining broke on `.`.** Verifying the above surfaced that `generate()`'s
+final `" ".join(tokens)` step has always produced invalid SQL for any
+dotted/qualified reference - confirmed directly against sqlfluff's own
+parser: `foo . bar` is unparsable, `foo.bar` isn't, for every dialect
+checked. This bug predates this session entirely; it stayed invisible
+because `_branch_score`'s shortest-render-wins heuristic almost always
+preferred a bare identifier over any dotted alternative (fewer tokens), so
+a dotted reference was rarely the one thing standing between an example and
+a passing self-check. Removing that bias surfaced it constantly - most
+`DeleteStatementSegment`/`CreateTableStatementSegment` examples for several
+dialects stopped self-checking at all once selection went random. Fixed
+with a new `_join_tokens` helper (replacing the two `" ".join(tokens)`
+call sites) that glues a bare `.` token tight to its neighbors and single-
+spaces everything else; confirmed this alone fixed the large majority of
+the newly-surfaced self-check failures.
+
+**Separate, known limitation this change surfaces more often (not fixed,
+already deferred above): `SUFFIX_VOCAB`'s `QuotedIdentifierSegment` value
+is a hardcoded ANSI-style `"double quoted"` string, which several dialects
+don't accept as identifier quoting** (confirmed: MySQL parses `"bar baz"`
+as a string literal, not an identifier, in identifier position, since its
+default quoting is backticks) - this is the per-dialect vocabulary override
+gap already listed above as deliberately deferred when layer 3 first
+shipped, just reached more often now that selection isn't biased away from
+it. Worked around for testing purposes (a fixed `--seed` that happens not
+to land on it for the dialects/segments under test), not fixed - a real
+per-dialect vocab override remains future work, not part of this change.
+
 **Deliberately deferred, not part of what shipped:**
 - Wiring to layer 1 (auto-picking `--segment` from "what changed in this PR").
 - Base-vs-head generation to filter pre-existing issues surfaced via shared/

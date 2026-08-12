@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Optional
@@ -227,10 +228,11 @@ def run(
     max_examples: int,
     skiplist: dict[tuple[str, str], str],
     coverage: int = 0,
+    seed: Optional[int] = None,
 ) -> bool:
     """Run the check. Returns True if there are no unresolved divergences."""
     checker = CHECKERS[dialect]
-    examples = gds.generate(dialect, segment, max_examples, coverage)
+    examples = gds.generate(dialect, segment, max_examples, coverage, seed)
     ok = True
     for sql in examples:
         if not gds.self_check(dialect, sql):
@@ -264,7 +266,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="0-100, forwarded to generate_dialect_sql.py - see its --help.",
     )
     parser.add_argument("--skiplist", type=Path, default=DEFAULT_SKIPLIST)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed forwarded to generate_dialect_sql.py for reproducible "
+            "output. Omit for a fresh random seed each run (printed to "
+            "stderr so you can reproduce this exact output later)."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    seed = args.seed
+    if seed is None:
+        seed = random.SystemRandom().randrange(2**32)
+        print(
+            f"[realengine_check] no --seed given, using {seed} - "
+            f"pass --seed {seed} to reproduce this output",
+            file=sys.stderr,
+        )
 
     if args.dialect == "postgres" and pglast is not None:
         pg_version = ".".join(str(part) for part in pglast.get_postgresql_version())
@@ -305,6 +326,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.max_examples,
             skiplist,
             args.coverage,
+            seed,
         )
     except (gds.GenerationError, RuntimeError) as err:
         print(f"error: {err}", file=sys.stderr)

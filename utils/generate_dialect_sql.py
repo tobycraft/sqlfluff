@@ -3,31 +3,37 @@
 Starting from a named segment or grammar (e.g. ``SelectStatementSegment``),
 walks the ``Sequence``/``OneOf``/``AnySetOf``/``Bracketed``/``Delimited``/``Ref``
 grammar objects sqlfluff builds in memory for a dialect and renders concrete SQL
-text: one minimal "baseline" example with every optional element omitted, plus
-one variant per optional element (with just that one added back in) and one
-variant per branch of a ``OneOf``/``AnySetOf``/``Delimited`` (with that branch
-substituted in). Minimal is the baseline (rather than "everything present")
-because it's far more likely to be valid SQL - fewer chances to combine two
-optional clauses that don't make sense together or land in a rarely-used
-optional branch.
+text: one "baseline" example, plus one variant per optional element (with just
+that one added back in) and one variant per branch of a
+``OneOf``/``AnySetOf``/``Delimited`` (with that branch substituted in).
 
-Three further dimensions get the same "one candidate per option" treatment:
-``MultiStringParser`` keyword alternatives (e.g. a bare-function set like
-``CURRENT_DATE``/``CURRENT_TIME``/...), repetition count on ``Delimited``
-(rendering 2 or 3 items instead of always exactly one, plus a trailing-
-delimiter variant where the grammar allows one - bare ``AnyNumberOf``/
-``AnySetOf`` are deliberately excluded, since their options are usually
-heterogeneous siblings rather than a repeatable homogeneous list, and
-re-rendering the same chosen element N times there produces nonsense like
-repeating a whole unrelated clause), and alternate values for terminal
-vocabulary categories (a second/third representative identifier, number,
-etc.). All of these register as ordinary candidates in the same registry
-optional-elements and branches already use, so they're discovered and
-combined by the same machinery described below.
+Every point where the grammar offers a choice - which branch of a
+``OneOf``/``AnySetOf``/``Delimited`` to take, which ``MultiStringParser``
+keyword to use (e.g. a bare-function set like ``CURRENT_DATE``/
+``CURRENT_TIME``/...), how many items a ``Delimited`` renders (1, 2, 3, or a
+trailing-delimiter variant where the grammar allows one - bare
+``AnyNumberOf``/``AnySetOf`` are deliberately excluded, since their options
+are usually heterogeneous siblings rather than a repeatable homogeneous list),
+and which terminal vocabulary value to use for an unresolved identifier/
+literal - is decided **randomly**, not by a heuristic. Each decision is made
+once per decision point, the first time it's encountered in a given
+``generate()`` call, then remembered for the rest of that call (see
+``_WalkState._choose``): the discovery/combination machinery below depends on
+a decision point rendering consistently across the many separate walks one
+``generate()`` call makes, so "random" means "roll once per point, not once
+per render." Pass ``--seed`` for reproducible output; omit it for a fresh
+random seed each run (printed to stderr so a specific run can be reproduced
+later). Whichever option isn't picked at a given point still registers as an
+ordinary candidate in the same registry optional-elements and branches
+already use, so it's still discovered and combined by the machinery below -
+nothing is less reachable for not being the random default.
 
-By default only the optional elements and branches reachable *while rendering
-the minimal baseline* are ever discovered - anything nested inside an optional
-that's omitted by default, or a branch that isn't chosen, is invisible. The
+Optional elements are still omitted by default (unaffected by the random
+choices above - that's a separate, always-deterministic mechanism), so the
+baseline is minimal in that sense. But by default only the optional elements
+and branches reachable *while rendering that one baseline walk* are ever
+discovered - anything nested inside an optional that's omitted by default, or
+a branch that wasn't the baseline's random pick, is invisible. The
 ``coverage`` parameter (0-100, default 0) trades runtime for looking deeper:
 it internally controls two things -
 
@@ -37,7 +43,7 @@ it internally controls two things -
   constraint grammar nested inside it, not just an empty ``()``;
 - how many candidates get toggled on *simultaneously* in one example, so
   interactions between two optional clauses (not just one at a time against
-  the minimal baseline) get exercised too.
+  the baseline) get exercised too.
 
 ``coverage=100`` is "the most thorough setting this tool considers practical,"
 not literally exhaustive - the true combinatorial space is exponential, and
@@ -66,6 +72,7 @@ That is a separate, later step.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
@@ -134,12 +141,14 @@ MAX_DISCOVERY_DEPTH = 5  # generous - reaching a real column definition inside
 MAX_COMBINATION_WIDTH = 4  # enough for e.g. WHERE + GROUP BY + ORDER BY +
 # LIMIT together, without approaching factorial blowup.
 
-# How many repeated items to try for a Delimited node (see _can_repeat for
-# why this doesn't extend to bare AnyNumberOf/AnySetOf). Fixed and small -
-# not derived from the grammar's own bounds, and not attempting to fully
-# replicate sqlfluff's real matching rules. 2 proves "does a second item and
-# its delimiter parse," 3 adds a little more confidence without meaningfully
-# increasing cost.
+# How many repeated items to consider for a Delimited node (see _can_repeat
+# for why this doesn't extend to bare AnyNumberOf/AnySetOf), one axis of the
+# random "how many items does the baseline show" choice alongside 1 (no
+# repeat) and, where the grammar allows it, a trailing-delimiter variant -
+# see _WalkState._choose. Fixed and small - not derived from the grammar's
+# own bounds, and not attempting to fully replicate sqlfluff's real matching
+# rules. 2 proves "does a second item and its delimiter parse," 3 adds a
+# little more confidence without meaningfully increasing cost.
 REPEAT_COUNTS = (2, 3)
 
 # Registered unconditionally (not gated behind --coverage), same as "add"
@@ -158,7 +167,7 @@ class _Candidate:
     """One point in the grammar tree where a variant could be generated."""
 
     index: int
-    kind: str  # "add", "branch", "template", "value", "repeat", or "trailing"
+    kind: str  # "add", "branch", "template", "value", or "count"
     payload: object  # informational only - never read back, see call sites
     # Other candidates' global ids that must also be active to reach this one
     # (its ancestors in the optional/branch nesting).
@@ -177,21 +186,25 @@ class _WalkState:
     whose payload is a plain string or int (template/value alternates, repeat
     counts) pass an explicit key built from stable parts instead, since
     string `id()` isn't reliable identity.
+
+    `rng`/`defaults` are also shared across every walk in one `generate()`
+    call, the same way `known`/`warned` are: `defaults` memoizes each
+    decision point's randomly-chosen default (see `_choose`) the first time
+    it's encountered, so the same point renders the same way in every later
+    walk of the same call regardless of which candidates are targeted.
     """
 
     dialect: Dialect
     known: dict[tuple, _Candidate]
+    rng: random.Random
     # Vocab-gap names already warned about - shared across every walk in one
     # `generate()` call (like `known`), so each gap prints once per segment
     # rather than once per occurrence.
     warned: set[str] = field(default_factory=set)
+    defaults: dict[tuple, object] = field(default_factory=dict)
     target_indices: frozenset[int] = frozenset()
     collecting: bool = False
     new_candidates: list[_Candidate] = field(default_factory=list)
-    # True while rendering a _branch_score probe: skip the (expensive,
-    # recursive) branch-ranking below and just take element 0, so scoring
-    # one branch can't cascade into scoring every branch beneath it.
-    scoring_probe: bool = False
 
     def _register(
         self, kind: str, payload: object, key: Optional[tuple] = None
@@ -208,6 +221,42 @@ class _WalkState:
             self.new_candidates.append(candidate)
         return candidate
 
+    def _choose(
+        self,
+        kind: str,
+        key: tuple,
+        options: list,
+        key_fn: Optional[callable] = None,
+    ) -> object:
+        """This decision point's default: random, memoized for this `generate()` call.
+
+        The first time `key` is seen (in any walk of this call), one option
+        is drawn at random and remembered in `defaults` for every later walk.
+        Every other option is still registered as an ordinary candidate
+        (`key_fn(option)`, or the usual `(kind, id(option))` if omitted), so
+        a `--coverage`-targeted walk can still render it instead - random
+        only decides what happens when nothing targets an alternative.
+
+        `options` must be in a stable, non-hash-order-dependent sequence
+        (callers holding a `set`/`frozenset` should `sorted()` it first) -
+        otherwise the same `--seed` could pick a different default on a
+        different process (`PYTHONHASHSEED`-dependent iteration order),
+        breaking reproducibility.
+        """
+        if key not in self.defaults:
+            self.defaults[key] = self.rng.choice(list(options))
+        chosen = self.defaults[key]
+        for option in options:
+            if option == chosen:
+                continue
+            candidate = self._register(
+                kind, option, key=key_fn(option) if key_fn else None
+            )
+            if candidate is not None and candidate.index in self.target_indices:
+                chosen = option
+                break
+        return chosen
+
 
 def _entry_point(name: str, dialect: Dialect):
     """Resolve a --segment name to something _render can walk."""
@@ -220,9 +269,9 @@ def _entry_point(name: str, dialect: Dialect):
 def _terminal_for(name: Optional[str], state: _WalkState) -> str:
     """Return a representative literal for an unresolved terminal `name`.
 
-    Registers any *additional* representative values (beyond the first,
-    which is always the default/baseline value) as ordinary "value"
-    candidates, the same way _render_branch registers branch alternates.
+    Randomly picks (and memoizes) one of this name's vocab values as the
+    default; every other value still registers as an ordinary "value"
+    candidate, the same way _render_branch registers branch alternates.
     """
     if not name:
         return DEFAULT_FALLBACK
@@ -244,13 +293,9 @@ def _terminal_for(name: Optional[str], state: _WalkState) -> str:
             )
         return DEFAULT_FALLBACK
 
-    chosen = values[0]
-    for alt in values[1:]:
-        candidate = state._register("value", alt, key=("value", name, alt))
-        if candidate is not None and candidate.index in state.target_indices:
-            chosen = alt
-            break
-    return chosen
+    return state._choose(
+        "value", ("value", name), values, key_fn=lambda alt: ("value", name, alt)
+    )
 
 
 def _render(
@@ -318,15 +363,17 @@ def _render(
             # e.g. a MultiStringParser built from an empty dialect set
             # (some dialects have no "bare functions", etc.)
             return [_terminal_for(vocab_hint, state)]
+        # sorted(): templates is a set, whose iteration order depends on
+        # PYTHONHASHSEED - sort first so the random pick below (and the
+        # candidate indices assigned to the rest) are --seed-reproducible
+        # across processes, not just within one.
         ranked = sorted(templates)
-        chosen = ranked[0]
-        for alt in ranked[1:]:
-            candidate = state._register(
-                "template", alt, key=("template", id(matchable), alt)
-            )
-            if candidate is not None and candidate.index in state.target_indices:
-                chosen = alt
-                break
+        chosen = state._choose(
+            "template",
+            ("template", id(matchable)),
+            ranked,
+            key_fn=lambda alt: ("template", id(matchable), alt),
+        )
         return [chosen]
 
     # RegexParser, TypedParser, or anything else without literal text.
@@ -357,66 +404,6 @@ def _render_sequence(
                 continue  # Omitted by default; only a targeted variant adds it.
         tokens.extend(_render(elem, dialect, None, active_refs, state))
     return tokens
-
-
-def _prefers_reference(elem: object) -> bool:
-    """Tie-break hint: does this option look like the "plain identifier" case?
-
-    Several grammars offer a keyword/bare-function alternative alongside a
-    plain table/column reference in the same OneOf (e.g. `TableExpressionSegment`
-    - shared by nearly every dialect - lists `BareFunctionSegment` ahead of
-    `TableReferenceSegment`). A bare keyword resolves in a single token just
-    like a plain reference does, so `_branch_score` alone often ties them, and
-    the stable sort then silently prefers whichever was declared first - which
-    is the special case here, not the common one. Confirmed concretely:
-    mariadb's `DeleteStatementSegment` generated only `DELETE FROM CURRENT_DATE
-    ...` (a bare no-parens datetime function standing in for a table name)
-    because `BareFunctionSegment` beat `TableReferenceSegment` on exactly this
-    tie. Reuses the same suffix convention as `SUFFIX_VOCAB` - a `Ref` name
-    ending in one of these means "this is what a real identifier/reference
-    looks like here," which is what a tie should resolve in favor of.
-    """
-    if not isinstance(elem, Ref):
-        return False
-    return any(elem._ref.endswith(suffix) for suffix, _ in SUFFIX_VOCAB)
-
-
-def _branch_score(elem: object, dialect: Dialect, warned: set[str]) -> int:
-    """Cheap proxy for how 'simple' a branch is: token count of a shallow render.
-
-    Grammars frequently list their most exotic form first (e.g. a BigQuery
-    ML.PREDICT table function ahead of a plain table reference), so always
-    picking element 0 tends to produce the least representative example. A
-    probe render is a cheap enough stand-in for "which branch is the plain/
-    common one" without fully expanding every option - "cheap" here comes
-    from the cycle guard alone (no separate depth cap): confirmed across a
-    full 28-dialect x 3-segment sweep that unbounded-by-depth probing still
-    completes in ~2s total, ~100ms worst case, since a probe can only
-    recurse through the dialect's few thousand distinct `Ref` names once
-    each before the cycle guard stops it.
-
-    The probe itself must not re-rank branches it encounters (that would
-    cascade into scoring every branch beneath every branch), so it runs with
-    `scoring_probe=True`, which makes nested `_render_branch` calls fall back
-    to plain element-0 selection instead of calling back into this function.
-    It also uses its own throwaway `known` registry, not the real discovery
-    process's, so probing never registers or consumes candidate identities
-    (harmless even when it tries: `collecting` is False by default, and
-    `_register` only ever creates an entry while collecting).
-    `warned` is still the real, shared one, though - a probe can bottom out
-    at the same vocab gaps as a real render, and those should count against
-    the same once-per-segment budget rather than a separate, discarded one.
-    """
-    probe_state = _WalkState(
-        dialect=dialect,
-        known={},
-        warned=warned,
-        scoring_probe=True,
-    )
-    try:
-        return len(_render(elem, dialect, None, frozenset(), probe_state))
-    except RecursionError:  # pragma: no cover - defensive only
-        return 10**6
 
 
 def _can_repeat(matchable: AnyNumberOf) -> bool:
@@ -486,45 +473,30 @@ def _render_branch(
     elements = matchable._elements
     if not elements:
         return []
-    if state.scoring_probe:
-        ranked = elements
-    else:
-        ranked = sorted(
-            elements,
-            key=lambda e: (
-                _branch_score(e, dialect, state.warned),
-                0 if _prefers_reference(e) else 1,
-            ),
-        )
-    chosen = ranked[0]  # The default: whichever alternate isn't targeted renders this.
-    for alt in ranked[1:]:
-        candidate = state._register("branch", alt)
-        if candidate is not None and candidate.index in state.target_indices:
-            chosen = alt
-            break  # A OneOf-style choice: at most one alternate can be active.
+    # A OneOf-style choice: at most one alternate can be active at a time.
+    chosen = state._choose("branch", ("branch", id(matchable)), elements)
 
     if _can_repeat(matchable):
         # _can_repeat guarantees Delimited here, which always has a real
         # delimiter (default Ref("CommaSegment")) - never None.
         delimiter = matchable.delimiter
-        for count in REPEAT_COUNTS:
-            candidate = state._register(
-                "repeat", count, key=("repeat", id(matchable), count)
-            )
-            if candidate is not None and candidate.index in state.target_indices:
-                return _render_repeated(
-                    chosen, delimiter, count, dialect, active_refs, state
-                )
+        shape_options: list = [1, *REPEAT_COUNTS]  # 1 = no repeat.
         if matchable.allow_trailing:
-            candidate = state._register(
-                "trailing", True, key=("trailing", id(matchable))
+            shape_options.append("trailing")
+        shape = state._choose(
+            "count",
+            ("shape", id(matchable)),
+            shape_options,
+            key_fn=lambda opt: ("count", id(matchable), opt),
+        )
+        if shape == "trailing":
+            tokens = _render_repeated(chosen, delimiter, 2, dialect, active_refs, state)
+            tokens.extend(_render(delimiter, dialect, None, active_refs, state))
+            return tokens
+        if shape != 1:
+            return _render_repeated(
+                chosen, delimiter, shape, dialect, active_refs, state
             )
-            if candidate is not None and candidate.index in state.target_indices:
-                tokens = _render_repeated(
-                    chosen, delimiter, 2, dialect, active_refs, state
-                )
-                tokens.extend(_render(delimiter, dialect, None, active_refs, state))
-                return tokens
 
     return _render(chosen, dialect, None, active_refs, state)
 
@@ -534,13 +506,17 @@ def _run_walk(
     dialect: Dialect,
     known: dict[tuple, _Candidate],
     warned: set[str],
+    rng: random.Random,
+    defaults: dict[tuple, object],
     target_indices: frozenset[int] = frozenset(),
     collecting: bool = False,
 ) -> tuple[list[str], _WalkState]:
     state = _WalkState(
         dialect=dialect,
         known=known,
+        rng=rng,
         warned=warned,
+        defaults=defaults,
         target_indices=target_indices,
         collecting=collecting,
     )
@@ -548,28 +524,63 @@ def _run_walk(
     return tokens, state
 
 
+def _join_tokens(tokens: list[str]) -> str:
+    """Join rendered tokens into SQL text, gluing a bare `.` tight to its neighbors.
+
+    Every other token pair gets a single separating space - fine for
+    everything this tool renders except `DotSegment` (the `.` in a qualified
+    reference like `schema.table`), which sqlfluff's own grammar parses
+    differently depending on adjacent whitespace: confirmed `foo . bar` is
+    unparsable while `foo.bar` isn't. This was a real, pre-existing gap in
+    every earlier version of this tool - it stayed invisible because the old
+    branch-selection heuristic (shortest-render-wins) almost always preferred
+    a bare identifier over any qualified/dotted alternative, so a dotted
+    reference was rarely the one thing keeping an example from self-checking.
+    Random selection surfaces it constantly, since it no longer avoids the
+    dotted form on purpose.
+    """
+    text = ""
+    for token in tokens:
+        if not text or token == "." or text.endswith("."):
+            text += token
+        else:
+            text += " " + token
+    return text
+
+
 def generate(
     dialect_name: str,
     segment_name: str,
     max_examples: int = 50,
     coverage: int = 0,
+    seed: Optional[int] = None,
 ) -> list[str]:
     """Generate SQL example strings for `segment_name` in `dialect_name`.
 
     `coverage` (0-100, default 0) trades runtime for how much of the grammar
     gets exercised - see the module docstring.
+
+    `seed` makes the random default-choice draws (see `_WalkState._choose`)
+    reproducible - the same `seed` with the same other arguments always
+    produces the same output. Omit it for a fresh, unpredictable seed each
+    call (drawn silently here - printing a seed for later reproduction is a
+    CLI concern, see `main`).
     """
     discovery_depth, combination_width = _coverage_to_params(coverage)
+    if seed is None:
+        seed = random.SystemRandom().randrange(2**32)
+    rng = random.Random(seed)
 
     dialect = dialect_selector(dialect_name)
     entry = _entry_point(segment_name, dialect)
 
     known: dict[tuple, _Candidate] = {}
     warned: set[str] = set()
+    defaults: dict[tuple, object] = {}
     baseline_tokens, baseline_state = _run_walk(
-        entry, dialect, known, warned, collecting=True
+        entry, dialect, known, warned, rng, defaults, collecting=True
     )
-    examples = [" ".join(baseline_tokens)]
+    examples = [_join_tokens(baseline_tokens)]
 
     # Discovery: for `discovery_depth` rounds, render each just-found
     # candidate on its own (with whatever prerequisites reach it) and see
@@ -593,6 +604,8 @@ def generate(
                 dialect,
                 known,
                 warned,
+                rng,
+                defaults,
                 target_indices=target,
                 collecting=True,
             )
@@ -610,9 +623,15 @@ def generate(
             other = all_candidates[(i + width_offset) % len(all_candidates)]
             target |= set(other.requires) | {other.index}
         tokens, _ = _run_walk(
-            entry, dialect, known, warned, target_indices=frozenset(target)
+            entry,
+            dialect,
+            known,
+            warned,
+            rng,
+            defaults,
+            target_indices=frozenset(target),
         )
-        text = " ".join(tokens)
+        text = _join_tokens(tokens)
         if text not in seen_texts:
             seen_texts.add(text)
             examples.append(text)
@@ -674,7 +693,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Don't drop examples that fail to parse under sqlfluff itself.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Seed the random default-choice draws for reproducible output. "
+            "Omit for a fresh random seed each run (printed to stderr so you "
+            "can reproduce this exact output later)."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    seed = args.seed
+    if seed is None:
+        seed = random.SystemRandom().randrange(2**32)
+        print(
+            f"[generate_dialect_sql] no --seed given, using {seed} - "
+            f"pass --seed {seed} to reproduce this output",
+            file=sys.stderr,
+        )
 
     try:
         examples = generate(
@@ -682,6 +720,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.segment,
             args.max_examples,
             args.coverage,
+            seed,
         )
     except GenerationError as err:
         print(f"error: {err}", file=sys.stderr)
