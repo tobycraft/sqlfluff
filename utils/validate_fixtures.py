@@ -57,6 +57,9 @@ except ImportError:
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "test" / "fixtures" / "dialects"
 FIXTURE_FILE_RE = re.compile(r"test/fixtures/dialects/(?P<name>[^/]+)/[^/]+\.sql$")
+# Substrings of SQLite's parser error messages. Semantic errors (e.g. "no such
+# table") contain none of these, so they're still ignored.
+SQLITE_SYNTAX_MARKERS = ("syntax error", "incomplete input", "unrecognized token")
 
 
 def _require(module, package: str, *, note: str = "") -> None:
@@ -94,11 +97,23 @@ def check_duckdb(sql: str) -> Optional[str]:
     reason - DuckDB has no pure-parse API for non-SELECT statements, so this
     executes against a scratch in-memory database and only treats a
     ParserException as a divergence).
+
+    External access and extension auto-install/load are disabled, so
+    statements like `INSTALL` or `COPY ... TO '/abs/path'` raise a
+    PermissionException (ignored as non-syntax) rather than downloading
+    extensions or touching the filesystem outside the scratch directory.
     """
     _require(duckdb, "duckdb")
     result: Optional[str] = None
     with _scratch_cwd():
-        con = duckdb.connect(":memory:")
+        con = duckdb.connect(
+            ":memory:",
+            config={
+                "enable_external_access": False,
+                "autoinstall_known_extensions": False,
+                "autoload_known_extensions": False,
+            },
+        )
         try:
             con.execute(sql)
         except duckdb.ParserException as err:
@@ -136,8 +151,8 @@ def check_sqlite(sql: str) -> Optional[str]:
     reason). Unlike DuckDB, sqlite3 doesn't distinguish a syntax error from
     other operational errors (e.g. a missing table) by exception type - both
     raise `sqlite3.OperationalError` - so this filters by message content
-    instead: only a message containing "syntax error" counts as a
-    divergence.
+    instead: only a message containing one of `SQLITE_SYNTAX_MARKERS` counts
+    as a divergence.
     """
     result: Optional[str] = None
     with _scratch_cwd():
@@ -146,7 +161,7 @@ def check_sqlite(sql: str) -> Optional[str]:
             con.execute(sql)
         except sqlite3.Error as err:
             message = str(err)
-            if "syntax error" in message:
+            if any(marker in message for marker in SQLITE_SYNTAX_MARKERS):
                 result = message
         finally:
             # Close before the temp dir is removed - see check_duckdb.
@@ -187,6 +202,9 @@ def iter_statements_from_sql(dialect: str, raw: str) -> Iterator[tuple[int, str]
     same way existing dialect fixture tests do
     (test/dialects/dialects_test.py's `lex_and_parse`), by handing the
     parser an already-rendered file.
+
+    Statements sqlfluff itself can't fully parse are skipped (with a warning
+    on stderr), since an engine rejecting them isn't a divergence.
     """
     config = FluffConfig(overrides={"dialect": dialect})
     templated_file = TemplatedFile.from_string(raw)
@@ -194,7 +212,15 @@ def iter_statements_from_sql(dialect: str, raw: str) -> Iterator[tuple[int, str]
         [templated_file], [], config, {}, templated_file.fname, "utf8", raw
     )
     parsed = Linter(config=config).parse_rendered(rendered_file)
+    for violation in parsed.violations:
+        print(
+            f"Warning: sqlfluff ({dialect}) could not parse line "
+            f"{violation.line_no}, skipping it: {violation.desc()}",
+            file=sys.stderr,
+        )
     for statement in parsed.tree.recursive_crawl("statement", recurse_into=False):
+        if "unparsable" in statement.descendant_type_set:
+            continue
         yield statement.pos_marker.working_line_no, statement.raw
 
 
@@ -240,7 +266,7 @@ def run(
             for line_no, sql in iter_statements(dialect, sql_path):
                 error = checker(sql)
                 if error is not None:
-                    rel_path = sql_path.relative_to(FIXTURES_DIR.parents[1])
+                    rel_path = sql_path.relative_to(FIXTURES_DIR.parents[2])
                     findings.append((dialect, rel_path.as_posix(), line_no, sql, error))
     return checked, skipped, findings
 
